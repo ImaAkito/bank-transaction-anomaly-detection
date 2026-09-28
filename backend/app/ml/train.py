@@ -118,11 +118,23 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-tune", action="store_true", help="пропустить подбор параметров")
+    parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
+    parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
+    parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
+    parser.add_argument("--ibm-from-year", type=int, default=2010)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
-    log.info("Генерация данных: clients=%s days=%s seed=%s", args.clients, args.days, args.seed)
-    df = generate_transactions(args.clients, args.days, args.seed)
+    if args.dataset == "ibm":
+        if not args.ibm_path:
+            parser.error("для --dataset ibm нужен --ibm-path")
+        from app.ml.ibm_loader import load_ibm
+
+        log.info("Загрузка IBM: %s (доля пользователей %s, с %s года)", args.ibm_path, args.ibm_user_fraction, args.ibm_from_year)
+        df = load_ibm(args.ibm_path, args.ibm_user_fraction, args.ibm_from_year, args.seed)
+    else:
+        log.info("Генерация данных: clients=%s days=%s seed=%s", args.clients, args.days, args.seed)
+        df = generate_transactions(args.clients, args.days, args.seed)
     log.info("Транзакций: %s, доля аномалий: %.3f", len(df), df["is_anomaly"].mean())
     frame = build_feature_frame(df)
     train, val, test = time_split(frame)

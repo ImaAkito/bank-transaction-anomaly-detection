@@ -103,6 +103,25 @@ python -m app.ml.experiments --dataset ibm --ibm-path /путь/к/card_transact
     --ibm-user-fraction 0.05 --ibm-from-year 2010 --out experiments/results_ibm
 ```
 
+Полный цикл на своём компьютере:
+
+```bash
+git clone https://github.com/ImaAkito/bank-transaction-anomaly-detection.git && cd bank-transaction-anomaly-detection
+git checkout claude/bank-anomaly-detection-ml-lc1px8
+pip install -r backend/requirements-dev.txt
+# 1) скачать набор с Kaggle (нужен аккаунт) и положить вне git-отслеживаемых файлов, например backend/datasets/
+mkdir -p backend/datasets && kaggle datasets download -d ealtman2019/credit-card-transactions -p backend/datasets --unzip
+cd backend
+# 2) эксперименты (результаты попадут в experiments/results_ibm)
+python -m app.ml.experiments --dataset ibm --ibm-path datasets/<имя_файла>.csv --out experiments/results_ibm
+# 3) при желании обучить рабочую модель на IBM
+python -m app.ml.train --dataset ibm --ibm-path datasets/<имя_файла>.csv --out models/model.joblib
+# 4) залить в git только результаты
+git add experiments/results_ibm && git commit -m "Результаты на IBM" && git push
+```
+
+Каталоги `datasets/`, файлы `*.csv`, `*.zip`, `*.parquet` и `backend/models/` исключены через `.gitignore`, поэтому набор и артефакт модели в git не попадут; `git status` перед коммитом стоит проверить. Для набора в десятки миллионов строк нужны несколько гигабайт памяти и время: уменьшайте `--ibm-user-fraction` (по умолчанию 0,05).
+
 Статус: загрузчик проверен тестами на макете файла (названия колонок и форматы значений записаны по памяти [Unverified]); на реальном файле не запускался, так как хосты с данными недоступны из среды разработки. Метрики на IBM в этом репозитории отсутствуют.
 
 ## Структура репозитория

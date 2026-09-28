@@ -12,3 +12,10 @@ backend/models/
 *.sqlite
 .DS_Store
 experiments/cache/
+
+# Наборы данных и большие файлы не коммитим; результаты экспериментов (report.md, summary.json, png) коммитим
+datasets/
+*.csv
+*.csv.gz
+*.zip
+*.parquet
