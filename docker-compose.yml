@@ -1,0 +1,100 @@
+# Запуск всего комплекса: docker compose up --build
+# Интерфейс: http://localhost:8080   API и Swagger: http://localhost:8000/docs
+name: anomaly-detection
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-anomaly}:${POSTGRES_PASSWORD:-anomaly}@postgres:5432/${POSTGRES_DB:-anomaly}
+  QUEUE_BACKEND: redis
+  REDIS_URL: redis://redis:6379/0
+  MODEL_PATH: /models/model.joblib
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-anomaly}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-anomaly}
+      POSTGRES_DB: ${POSTGRES_DB:-anomaly}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-anomaly} -d ${POSTGRES_DB:-anomaly}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Разовая задача: обучает модель и сохраняет артефакт в общий том, если его ещё нет.
+  trainer:
+    build: ./backend
+    command: >
+      sh -c "test -f /models/model.joblib
+      && echo 'Модель уже обучена, пропуск'
+      || python -m app.ml.train --out /models/model.joblib"
+    volumes:
+      - models:/models
+    restart: "no"
+
+  api:
+    build: ./backend
+    environment:
+      <<: *backend-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - models:/models
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      trainer: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *backend-env
+    volumes:
+      - models:/models
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  # Демонстрационный источник транзакций (имитирует банковскую систему).
+  simulator:
+    build: ./backend
+    command: >
+      python -m app.simulation.simulator --api http://api:8000 --mode enqueue
+      --clients ${SIM_CLIENTS:-40} --rate ${SIM_RATE:-4} --loop
+    depends_on:
+      api: {condition: service_healthy}
+      worker: {condition: service_started}
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  models:

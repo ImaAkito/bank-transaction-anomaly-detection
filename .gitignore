@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.env
+node_modules/
+frontend/dist/
+backend/data/
+backend/models/
+*.db
+*.sqlite
+.DS_Store
+experiments/cache/
+
+# Наборы данных и большие файлы не коммитим; результаты экспериментов (report.md, summary.json, png) коммитим
+datasets/
+*.csv
+*.csv.gz
+*.zip
+*.parquet
