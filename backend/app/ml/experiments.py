@@ -34,7 +34,7 @@ from sklearn.svm import OneClassSVM
 from app.domain.features import CONTEXT_FREE_FEATURES, FEATURE_GROUPS, FEATURE_NAMES
 from app.ml.dataset import build_feature_frame, time_split
 from app.ml.metrics import best_f1_threshold, evaluate
-from app.simulation.generator import ANOMALY_TYPES, generate_transactions
+from app.simulation.generator import generate_transactions
 
 log = logging.getLogger("experiments")
 
@@ -180,15 +180,15 @@ def assess(fitted: Fitted, Xtr, Xva, yva, Xte, yte, test_types) -> dict:
         result["label_free_threshold"] = evaluate(yte, s_te, thr_free)
         flagged = s_te >= thr_free
         result["recall_by_type"] = {
-            t: float(flagged[(test_types == t)].mean()) for t in ANOMALY_TYPES if (test_types == t).any()
+            t: float(flagged[(test_types == t)].mean()) for t in sorted(set(test_types)) if t and (test_types == t).any()
         }
     result["_scores"] = s_te
     return result
 
 
-def run_seed(seed: int, clients: int, days: int, tuned_params: dict | None) -> dict:
-    log.info("=== seed %s: генерация данных", seed)
-    df = generate_transactions(clients, days, seed)
+def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dict | None) -> dict:
+    log.info("=== seed %s: подготовка данных", seed)
+    df = source(seed)
     frame = build_feature_frame(df)
     train, val, test = time_split(frame)
     ytr, yva, yte = (f["is_anomaly"].values.astype(int) for f in (train, val, test))
@@ -411,6 +411,10 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
+    parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
+    parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
+    parser.add_argument("--ibm-from-year", type=int, default=2010)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
@@ -418,9 +422,21 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    if args.dataset == "ibm":
+        if not args.ibm_path:
+            parser.error("для --dataset ibm нужен --ibm-path")
+        from app.ml.ibm_loader import load_ibm
+
+        # Разные seed дают разные выборки пользователей.
+        def source(seed: int) -> pd.DataFrame:
+            return load_ibm(args.ibm_path, args.ibm_user_fraction, args.ibm_from_year, seed)
+    else:
+        def source(seed: int) -> pd.DataFrame:
+            return generate_transactions(args.clients, args.days, seed)
+
     runs, tuned = [], None
     for seed in args.seeds:
-        run = run_seed(seed, args.clients, args.days, tuned)
+        run = run_seed(seed, source, tuned)
         tuned = run["tuned_if_params"]  # подбор выполняется на первом наборе, далее параметры фиксируются
         runs.append(run)
     summary = aggregate(runs)

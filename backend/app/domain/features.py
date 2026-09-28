@@ -12,9 +12,9 @@ import numpy as np
 from app.domain.preprocessing import Tx
 
 FEATURE_GROUPS: dict[str, list[str]] = {
-    "amount": ["log_amount", "log_ratio_median", "amount_zscore", "amount_to_max"],
-    "time": ["hour_sin", "hour_cos", "is_night", "hour_freq", "weekday_freq"],
-    "velocity": ["log_secs_since_last", "tx_count_1h", "tx_count_24h", "rate_ratio"],
+    "amount": ["log_amount", "log_ratio_median", "amount_zscore", "amount_to_max", "cat_amount_zscore", "cat_log_dev"],
+    "time": ["hour_sin", "hour_cos", "is_night", "hour_freq", "weekday_freq", "hour_dev"],
+    "velocity": ["log_secs_since_last", "tx_count_1h", "tx_count_24h", "rate_ratio", "gap_ratio"],
     "novelty": [
         "category_freq",
         "is_new_category",
@@ -39,6 +39,10 @@ FEATURE_LABELS_RU: dict[str, str] = {
     "hour_sin": "Время суток (sin)",
     "hour_cos": "Время суток (cos)",
     "is_night": "Ночное время",
+    "cat_amount_zscore": "Отклонение суммы от обычной для этой категории (z-оценка)",
+    "cat_log_dev": "Отклонение суммы от средней по категории (в лог-шкале)",
+    "hour_dev": "Удалённость от привычного часа активности",
+    "gap_ratio": "Интервал с предыдущей операции относительно обычного",
     "hour_freq": "Частота операций клиента в этот час",
     "weekday_freq": "Частота операций клиента в этот день недели",
     "log_secs_since_last": "Время с предыдущей операции",
@@ -67,6 +71,7 @@ PRIORS = {
 }
 SMOOTHING = 10.0
 MIN_STD = 0.3
+CAT_MATURITY_K = 5.0
 MATURITY_K = 15.0  # признаки новизны и z-оценка ослабляются на коротких историях: n / (n + K)
 MAX_SECS = 30 * 86400.0
 
@@ -108,6 +113,27 @@ def compute_features(
     hour_freq = _smoothed(hour_count, n, PRIORS["hour_freq"])
     weekday_freq = _smoothed(profile["weekday_counts"][tx.ts.weekday()], n, PRIORS["weekday_freq"])
 
+    # Сумма относительно привычной для КАТЕГОРИИ (общая медиана смешивает категории с разным масштабом сумм).
+    cat_n, cat_mean, cat_m2 = profile.get("cat_stats", {}).get(tx.category, (0, 0.0, 0.0))
+    if warm and cat_n >= 3:
+        cat_maturity = cat_n / (cat_n + CAT_MATURITY_K)
+        cat_std = max(math.sqrt(cat_m2 / (cat_n - 1)), MIN_STD)
+        cat_dev = float(np.clip(log_amount - cat_mean, -6.0, 6.0))
+        cat_zscore = float(np.clip((log_amount - cat_mean) / cat_std, -10.0, 10.0)) * cat_maturity
+        cat_dev *= cat_maturity
+    else:
+        cat_zscore, cat_dev = 0.0, 0.0
+
+    # Удалённость от привычного часа: круговое среднее часов клиента, взвешенное концентрацией R.
+    if warm and n > 0:
+        sin_sum, cos_sum = profile.get("hour_sin_sum", 0.0), profile.get("hour_cos_sum", 0.0)
+        concentration = min(math.hypot(sin_sum, cos_sum) / n, 1.0)
+        mean_angle = math.atan2(sin_sum, cos_sum)
+        diff = abs((2 * math.pi * hour / 24 - mean_angle + math.pi) % (2 * math.pi) - math.pi)
+        hour_dev = diff * 24 / (2 * math.pi) * concentration
+    else:
+        hour_dev = 0.0
+
     epoch = tx.epoch
     last_ts = profile["last_ts"]
     secs_since_last = MAX_SECS if last_ts is None else float(np.clip(epoch - last_ts, 0.0, MAX_SECS))
@@ -120,6 +146,11 @@ def compute_features(
     else:
         avg_daily = 0.0
     rate_ratio = min((count_24h + 1.0) / (avg_daily + 1.0), 20.0)
+    if warm and avg_daily > 0 and last_ts is not None:
+        typical_gap = 86400.0 / avg_daily
+        gap_ratio = float(np.clip(math.log((secs_since_last + 1.0) / (typical_gap + 1.0)), -8.0, 8.0))
+    else:
+        gap_ratio = 0.0
 
     cat_count = profile["categories"].get(tx.category, 0)
     chan_count = profile["channels"].get(tx.channel, 0)
@@ -137,15 +168,19 @@ def compute_features(
         "log_ratio_median": log_ratio,
         "amount_zscore": zscore,
         "amount_to_max": to_max,
+        "cat_amount_zscore": cat_zscore,
+        "cat_log_dev": cat_dev,
         "hour_sin": math.sin(2 * math.pi * hour / 24),
         "hour_cos": math.cos(2 * math.pi * hour / 24),
         "is_night": 1.0 if hour < 6 else 0.0,
         "hour_freq": hour_freq,
         "weekday_freq": weekday_freq,
+        "hour_dev": hour_dev,
         "log_secs_since_last": math.log1p(secs_since_last),
         "tx_count_1h": float(count_1h),
         "tx_count_24h": float(count_24h),
         "rate_ratio": rate_ratio,
+        "gap_ratio": gap_ratio,
         "category_freq": _smoothed(cat_count, n, PRIORS["category_freq"]),
         "is_new_category": maturity if warm and cat_count == 0 else 0.0,
         "channel_freq": _smoothed(chan_count, n, PRIORS["channel_freq"]),

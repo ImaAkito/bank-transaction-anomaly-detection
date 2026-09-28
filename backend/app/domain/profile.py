@@ -27,6 +27,9 @@ def new_profile() -> dict[str, Any]:
         "log_m2": 0.0,
         "max_amount": 0.0,
         "amounts": [],
+        "cat_stats": {},
+        "hour_sin_sum": 0.0,
+        "hour_cos_sum": 0.0,
         "hour_counts": [0] * 24,
         "weekday_counts": [0] * 7,
         "categories": {},
@@ -68,6 +71,15 @@ def update_behavior(profile: dict[str, Any], tx: Tx) -> None:
     if len(amounts) > AMOUNT_WINDOW:
         del amounts[: len(amounts) - AMOUNT_WINDOW]
 
+    stats = profile.setdefault("cat_stats", {}).setdefault(tx.category, [0, 0.0, 0.0])
+    stats[0] += 1
+    cat_delta = x - stats[1]
+    stats[1] += cat_delta / stats[0]
+    stats[2] += cat_delta * (x - stats[1])
+
+    angle = 2 * math.pi * tx.ts.hour / 24
+    profile["hour_sin_sum"] = profile.get("hour_sin_sum", 0.0) + math.sin(angle)
+    profile["hour_cos_sum"] = profile.get("hour_cos_sum", 0.0) + math.cos(angle)
     profile["hour_counts"][tx.ts.hour] += 1
     profile["weekday_counts"][tx.ts.weekday()] += 1
     _inc(profile["categories"], tx.category)
