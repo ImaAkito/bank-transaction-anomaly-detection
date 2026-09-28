@@ -88,7 +88,8 @@ def test_deviations_are_detected_against_history():
                                                   channel="web", recipient="NEW", currency="USD"), min_history=5)
     assert spike["log_ratio_median"] > 2.5 and spike["amount_zscore"] > 5
     assert ctx["amount_ratio"] > 15
-    assert spike["is_new_category"] == spike["is_new_channel"] == spike["is_new_recipient"] == spike["is_new_currency"] == 1
+    novelty = [spike[k] for k in ("is_new_category", "is_new_channel", "is_new_recipient", "is_new_currency")]
+    assert len(set(novelty)) == 1 and 0.5 < novelty[0] < 1  # ослаблено зрелостью профиля n / (n + K)
     assert spike["hour_freq"] < typical["hour_freq"] and spike["is_night"] == 1
     assert typical["is_new_category"] == 0 and abs(typical["amount_zscore"]) < 3
 
@@ -102,6 +103,27 @@ def test_velocity_features_count_recent_operations():
         feed(profile, make_tx(ts=base + timedelta(days=10, minutes=k * 2)))
     features, ctx = compute_features(profile, make_tx(ts=base + timedelta(days=10, minutes=10)))
     assert features["tx_count_1h"] == 4 and ctx["count_1h"] == 4
+
+
+def test_novelty_is_weaker_for_young_profiles():
+    young, mature = new_profile(), new_profile()
+    for i in range(6):
+        feed(young, make_tx(i, day=i))
+    for i in range(120):
+        feed(mature, make_tx(i, day=i // 3))
+    probe = make_tx(500, category="jewelry", day=200)
+    assert compute_features(young, probe)[0]["is_new_category"] < compute_features(mature, probe)[0]["is_new_category"]
+
+
+def test_hold_rule_targets_numeric_outliers_only():
+    from app.domain.features import should_hold
+
+    profile = new_profile()
+    for i in range(40):
+        feed(profile, make_tx(i, amount=1000 + (i % 5) * 50, day=i // 4))
+    assert should_hold(compute_features(profile, make_tx(99, amount=20000, day=11))[0])
+    assert not should_hold(compute_features(profile, make_tx(99, amount=1100, day=11, category="jewelry",
+                                                            channel="web", hour=3))[0])
 
 
 def test_out_of_order_timestamp_is_handled():

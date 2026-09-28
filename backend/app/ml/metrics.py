@@ -28,5 +28,6 @@ def best_f1_threshold(y_true: np.ndarray, scores: np.ndarray) -> float:
         return float(s[0])
     precision = tp / (tp + fp)
     recall = tp / total_pos
-    f1 = np.where(precision + recall > 0, 2 * precision * recall / (precision + recall), 0.0)
+    denominator = precision + recall
+    f1 = np.divide(2 * precision * recall, denominator, out=np.zeros_like(denominator), where=denominator > 0)
     return float(s[int(np.argmax(f1))])

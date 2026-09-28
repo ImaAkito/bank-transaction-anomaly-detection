@@ -10,6 +10,8 @@ from app.ml.model import ModelBundle
 
 log = logging.getLogger(__name__)
 
+MIN_HISTORY_FOR_TIME = 15
+
 TYPE_LABELS_RU = {
     "amount": "сумма",
     "time": "время",
@@ -71,7 +73,8 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
             }
         )
 
-    if features["hour_freq"] < 0.03:
+    # Нетипичное время: по «сырой» доле операций клиента в этот час; на коротких историях вывод ненадёжен.
+    if ctx["history_len"] >= MIN_HISTORY_FOR_TIME and ctx["hour_share"] < 0.03:
         share = ctx["hour_share"]
         reasons.append(
             {
@@ -84,42 +87,42 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
             }
         )
 
-    if features["is_new_category"]:
+    if features["is_new_category"] > 0:
         reasons.append(
             {
                 "code": "new_category",
                 "type": "category",
-                "severity": 0.8,
+                "severity": 0.8 * features["is_new_category"],
                 "value": ctx["category"],
                 "text": f"Данная категория операции («{ctx['category']}») ранее не использовалась клиентом",
             }
         )
-    if features["is_new_channel"]:
+    if features["is_new_channel"] > 0:
         reasons.append(
             {
                 "code": "new_channel",
                 "type": "channel",
-                "severity": 0.6,
+                "severity": 0.6 * features["is_new_channel"],
                 "value": ctx["channel"],
                 "text": f"Канал проведения операции («{ctx['channel']}») ранее не использовался клиентом",
             }
         )
-    if features["is_new_currency"]:
+    if features["is_new_currency"] > 0:
         reasons.append(
             {
                 "code": "new_currency",
                 "type": "currency",
-                "severity": 0.6,
+                "severity": 0.6 * features["is_new_currency"],
                 "value": ctx["currency"],
                 "text": f"Валюта операции ({ctx['currency']}) ранее не использовалась клиентом",
             }
         )
-    if features["is_new_recipient"]:
+    if features["is_new_recipient"] > 0:
         reasons.append(
             {
                 "code": "new_recipient",
                 "type": "recipient",
-                "severity": 0.3,
+                "severity": 0.3 * features["is_new_recipient"],
                 "value": ctx["recipient_id"],
                 "text": "Получатель платежа ранее не встречался в истории клиента",
             }

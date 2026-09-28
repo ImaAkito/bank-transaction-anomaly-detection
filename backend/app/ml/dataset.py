@@ -2,13 +2,14 @@
 
 Транзакции обрабатываются в хронологическом порядке тем же кодом, что и онлайн:
 признаки считаются по профилю ДО текущей операции, затем профиль обновляется.
-Размеченные аномалии не попадают в «типичное поведение» профиля (аналог решения специалиста
-«операция подозрительна»), но всегда учитываются в признаках частоты.
+Политика удержания (hold_policy): «rule» — детерминированное правило should_hold по признакам (как в эксплуатации),
+«labels» — вне профиля остаются истинные аномалии (только для сравнения), «none» — профиль обновляется всегда.
+Во всех случаях операция учитывается в признаках частоты (activity).
 """
 import pandas as pd
 
 from app.config import DEFAULT_CURRENCY_RATES
-from app.domain.features import FEATURE_NAMES, compute_features
+from app.domain.features import FEATURE_NAMES, compute_features, should_hold
 from app.domain.preprocessing import normalize
 from app.domain.profile import new_profile, update_activity, update_behavior
 
@@ -19,7 +20,7 @@ def build_feature_frame(
     df: pd.DataFrame,
     rates: dict[str, float] | None = None,
     min_history: int = 5,
-    hold_labeled_anomalies: bool = True,
+    hold_policy: str = "rule",
 ) -> pd.DataFrame:
     rates = rates or DEFAULT_CURRENCY_RATES
     profiles: dict[str, dict] = {}
@@ -55,7 +56,13 @@ def build_feature_frame(
             }
         )
         update_activity(profile, tx.epoch)
-        if not (hold_labeled_anomalies and is_anomaly):
+        if hold_policy == "rule":
+            hold = should_hold(features)
+        elif hold_policy == "labels":
+            hold = is_anomaly
+        else:
+            hold = False
+        if not hold:
             update_behavior(profile, tx)
 
     frame = pd.DataFrame.from_records(records, columns=META_COLUMNS + FEATURE_NAMES)

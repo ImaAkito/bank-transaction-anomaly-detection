@@ -65,7 +65,7 @@ def test_shap_points_at_the_anomalous_feature(model_path):
 
 def test_reasons_and_summary_texts():
     features = {n: 0.0 for n in FEATURE_NAMES}
-    features.update({"amount_zscore": 6.0, "hour_freq": 0.0, "is_night": 1.0, "is_new_category": 1.0,
+    features.update({"amount_zscore": 6.0, "hour_freq": 0.0, "is_night": 1.0, "is_new_category": 0.9,
                      "rate_ratio": 1.0})
     ctx = {"warm": True, "history_len": 50, "median_amount": 1000.0, "amount_ratio": 8.4, "hour": 3,
            "hour_share": 0.0, "count_1h": 0, "count_24h": 1, "avg_daily": 2.0, "category": "jewelry",

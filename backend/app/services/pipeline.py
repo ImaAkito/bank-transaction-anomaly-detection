@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.domain.features import to_vector, compute_features
+from app.domain.features import compute_features, should_hold, to_vector
 from app.domain.preprocessing import Tx, normalize
 from app.domain.profile import new_profile, update_activity, update_behavior
 from app.ml.explain import build_reasons, shap_factors, summarize
@@ -218,8 +218,8 @@ class AnalysisService:
         factors = shap_factors(bundle, features) if settings.explain_shap and risk != "low" else []
         deviation_types, summary = summarize(reasons, risk)
 
-        # Операции высокого риска не искажают типичное поведение до решения специалиста.
-        hold = risk == "high"
+        # Выбросы по сумме и всплески частоты не искажают типичное поведение до решения специалиста.
+        hold = should_hold(features)
         update_activity(profile, tx.epoch)
         if not hold:
             update_behavior(profile, tx)

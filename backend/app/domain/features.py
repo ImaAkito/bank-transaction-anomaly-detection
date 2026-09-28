@@ -65,8 +65,9 @@ PRIORS = {
     "recipient_cat_freq": 0.25,
     "currency_freq": 0.9,
 }
-SMOOTHING = 3.0
+SMOOTHING = 10.0
 MIN_STD = 0.3
+MATURITY_K = 15.0  # признаки новизны и z-оценка ослабляются на коротких историях: n / (n + K)
 MAX_SECS = 30 * 86400.0
 
 
@@ -84,6 +85,7 @@ def compute_features(
     """Возвращает (признаки, контекст). Контекст нужен модулю интерпретации, в модель не подаётся."""
     n = profile["n"]
     warm = n >= min_history
+    maturity = n / (n + MATURITY_K) if MATURITY_K > 0 else 1.0
     hour = tx.ts.hour
     log_amount = math.log1p(tx.amount_base)
 
@@ -95,7 +97,7 @@ def compute_features(
         ratio, log_ratio = 1.0, 0.0
     if warm:
         std = max(math.sqrt(profile["log_m2"] / (n - 1)), MIN_STD)
-        zscore = float(np.clip((log_amount - profile["log_mean"]) / std, -10.0, 10.0))
+        zscore = float(np.clip((log_amount - profile["log_mean"]) / std, -10.0, 10.0)) * maturity
         max_amount = profile["max_amount"]
         to_max = min(tx.amount_base / max_amount, 20.0) if max_amount > 0 else 1.0
     else:
@@ -145,13 +147,13 @@ def compute_features(
         "tx_count_24h": float(count_24h),
         "rate_ratio": rate_ratio,
         "category_freq": _smoothed(cat_count, n, PRIORS["category_freq"]),
-        "is_new_category": 1.0 if warm and cat_count == 0 else 0.0,
+        "is_new_category": maturity if warm and cat_count == 0 else 0.0,
         "channel_freq": _smoothed(chan_count, n, PRIORS["channel_freq"]),
-        "is_new_channel": 1.0 if warm and chan_count == 0 else 0.0,
+        "is_new_channel": maturity if warm and chan_count == 0 else 0.0,
         "recipient_cat_freq": recipient_cat_freq,
-        "is_new_recipient": 1.0 if warm and new_recipient else 0.0,
+        "is_new_recipient": maturity if warm and new_recipient else 0.0,
         "currency_freq": _smoothed(curr_count, n, PRIORS["currency_freq"]),
-        "is_new_currency": 1.0 if warm and curr_count == 0 else 0.0,
+        "is_new_currency": maturity if warm and curr_count == 0 else 0.0,
         "log_history_len": math.log1p(n),
     }
     context = {
@@ -173,6 +175,22 @@ def compute_features(
         "known_channels": sorted(profile["channels"]),
     }
     return features, context
+
+
+HOLD_RATIO = 5.0
+HOLD_BURST_COUNT = 3
+
+
+def should_hold(features: dict[str, float]) -> bool:
+    """Правило удержания операции вне «типичного поведения» профиля.
+
+    Удерживаются операции, способные исказить статистику профиля: выброс по сумме (не менее чем в 5 раз выше
+    медианы) и всплеск частоты (3 и более операций за предыдущий час). Новизна категории, канала, получателя
+    или времени не удерживается: легитимное изменение привычек должно попадать в профиль.
+    Правило зависит только от признаков, поэтому одинаково применяется при обучении и в эксплуатации.
+    Удержанная операция добавляется в профиль, если специалист подтвердит её как нормальную.
+    """
+    return features["log_ratio_median"] >= math.log(HOLD_RATIO) or features["tx_count_1h"] >= HOLD_BURST_COUNT
 
 
 def to_vector(features: dict[str, float], names: list[str] | None = None) -> np.ndarray:
