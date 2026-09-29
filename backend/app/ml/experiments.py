@@ -31,14 +31,14 @@ from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 
-from app.domain.features import CONTEXT_FREE_FEATURES, FEATURE_GROUPS, FEATURE_NAMES, select_features
-from app.ml.dataset import build_feature_frame, time_split
-from app.ml.metrics import best_f1_threshold, evaluate
+from app.domain.features import CONTEXT_FREE_FEATURES, DEFAULT_FEATURE_NAMES, FEATURE_GROUPS, select_features
+from app.ml.dataset import build_feature_frame, fit_population_on_train, time_split
+from app.ml.metrics import BUDGETS, best_f1_threshold, budget_metrics, evaluate
 from app.simulation.generator import generate_transactions
 
 log = logging.getLogger("experiments")
 
-FEATURES: list[str] = list(FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
+FEATURES: list[str] = list(DEFAULT_FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
 LABEL_FREE_QUANTILE = 0.98
 UNSUPERVISED_SUBSAMPLE = {"lof": 15000, "ocsvm": 8000}
 
@@ -126,6 +126,15 @@ def fit_zscore_rule(Xtr, columns) -> Fitted:
     return Fitted("Правило: z-оценка суммы", False, lambda X: X[:, idx], {}, 0.0)
 
 
+def fit_min_frequency_rule(columns) -> Fitted | None:
+    """Правило-эталон: оценка = -min(частот категории, канала, региона получателя, часа) у клиента."""
+    names = [c for c in ("category_freq", "channel_freq", "recipient_cat_freq", "hour_freq") if c in columns]
+    if not names:
+        return None
+    idx = [columns.index(c) for c in names]
+    return Fitted("Правило: минимальная частота", False, lambda X: -X[:, idx].min(axis=1), {"features": names}, 0.0)
+
+
 def fit_logreg(Xtr, ytr, seed) -> Fitted:
     t0 = time.perf_counter()
     scaler = StandardScaler().fit(Xtr)
@@ -174,6 +183,7 @@ def assess(fitted: Fitted, Xtr, Xva, yva, Xte, yte, test_types) -> dict:
         "roc_auc": float(roc_auc_score(yte, s_te)),
         "pr_auc": _pr_auc(yte, s_te),
         "val_threshold": evaluate(yte, s_te, thr_val),
+        "budget": budget_metrics(yte, s_te),
         "fit_seconds": fitted.fit_seconds,
         "score_ms_per_1k": score_ms_per_1k,
         "params": fitted.params,
@@ -192,7 +202,7 @@ def assess(fitted: Fitted, Xtr, Xva, yva, Xte, yte, test_types) -> dict:
 def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dict | None) -> dict:
     log.info("=== seed %s: подготовка данных", seed)
     df = source(seed)
-    frame = build_feature_frame(df)
+    frame = build_feature_frame(df, population=fit_population_on_train(df))
     train, val, test = time_split(frame)
     ytr, yva, yte = (f["is_anomaly"].values.astype(int) for f in (train, val, test))
     test_types = test["anomaly_type"].values
@@ -229,6 +239,7 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
     except Exception as exc:  # вырожденная ковариация допустима для отдельных наборов признаков
         log.warning("Elliptic Envelope пропущен: %s", exc)
     run(fit_zscore_rule(Xtr, FEATURES) if "amount_zscore" in FEATURES else None)
+    run(fit_min_frequency_rule(FEATURES))
     run(fit_logreg(Xtr, ytr, seed))
     run(fit_xgboost(Xtr, ytr, Xva, yva, seed))
     run(fit_lightgbm(Xtr, ytr, Xva, yva, seed))
@@ -283,6 +294,10 @@ def aggregate(runs: list[dict]) -> dict:
         for key in ("val_threshold", "label_free_threshold"):
             if key in rows[0]:
                 entry[key] = {m: _agg([r[key][m] for r in rows]) for m in ("precision", "recall", "f1", "flagged_share")}
+        entry["budget"] = {
+            b: {m: _agg([r["budget"][b][m] for r in rows]) for m in ("precision", "recall", "true_positive")}
+            for b in rows[0]["budget"]
+        }
         if "recall_by_type" in rows[0]:
             types = rows[0]["recall_by_type"]
             entry["recall_by_type"] = {t: _agg([r["recall_by_type"].get(t, np.nan) for r in rows]) for t in types}
@@ -334,6 +349,13 @@ def write_report(summary: dict, path: Path) -> None:
         t = m["val_threshold"]
         lines.append(f"| {name} | {'с учителем' if m['supervised'] else 'без учителя'} | {_pm(t['precision'])} | "
                      f"{_pm(t['recall'])} | {_pm(t['f1'])} | {_pm(m['roc_auc'])} | {_pm(m['pr_auc'])} |")
+    lines += ["", "## 1b. Фиксированный бюджет оповещений (проверяется доля операций с наибольшей оценкой)", ""]
+    budgets = [f"{b:g}" for b in BUDGETS]
+    lines.append("| Метод | " + " | ".join(f"Топ {float(b):.1%}: Precision / Recall" for b in budgets) + " |")
+    lines.append("|---|" + "---|" * len(budgets))
+    for name, m in summary["models"].items():
+        cells = [f"{m['budget'][b]['precision']['mean']:.3f} / {m['budget'][b]['recall']['mean']:.3f}" for b in budgets]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
     lines += [
         "",
         f"## 2. Неконтролируемые методы: порог без меток (квантиль {LABEL_FREE_QUANTILE:.0%} оценок обучающей части)",
@@ -419,7 +441,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--days", type=int, default=60)
-    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history")
+    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history,population (по умолчанию все, кроме population)")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
     parser.add_argument("--ibm-user-fraction", type=float, default=0.05)

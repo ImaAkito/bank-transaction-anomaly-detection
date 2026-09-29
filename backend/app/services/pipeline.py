@@ -207,7 +207,7 @@ class AnalysisService:
         client = self._get_or_create_client(db, tx.client_id, tx.ts)
         profile = copy.deepcopy(client.profile)
 
-        features, ctx = compute_features(profile, tx, settings.min_history_for_profile)
+        features, ctx = compute_features(profile, tx, settings.min_history_for_profile, getattr(bundle, "population", None))
         x = to_vector(features, bundle.feature_names)
         score = float(bundle.score(x)[0])
         risk = bundle.risk_level(score, {"medium": settings.risk_medium, "high": settings.risk_high})

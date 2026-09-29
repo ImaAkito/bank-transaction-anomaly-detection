@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from app.domain.features import FEATURE_GROUPS, FEATURE_NAMES
-from app.ml.dataset import build_feature_frame, time_split
+from app.ml.dataset import build_feature_frame, fit_population_on_train, time_split
 from app.simulation.generator import generate_transactions
 
 log = logging.getLogger("diagnostics")
@@ -74,7 +74,7 @@ def main() -> None:
     else:
         df = generate_transactions(300, 60, args.seed)
     log.info("Операций: %s, аномалий: %s", len(df), int(df["is_anomaly"].sum()))
-    frame = build_feature_frame(df)
+    frame = build_feature_frame(df, population=fit_population_on_train(df))
     train, val, test = time_split(frame)
 
     lines = ["# Диагностика набора данных", "",

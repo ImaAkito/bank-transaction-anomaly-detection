@@ -11,6 +11,7 @@ from app.ml.model import ModelBundle
 log = logging.getLogger(__name__)
 
 MIN_HISTORY_FOR_TIME = 15
+RARE_REGION_SURPRISAL = 4.0  # частота значения среди всех клиентов не выше ~1,8%
 
 TYPE_LABELS_RU = {
     "amount": "сумма",
@@ -115,6 +116,26 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "severity": 0.6 * features["is_new_currency"],
                 "value": ctx["currency"],
                 "text": f"Валюта операции ({ctx['currency']}) ранее не использовалась клиентом",
+            }
+        )
+    if features.get("novel_rare_region", 0.0) >= RARE_REGION_SURPRISAL:
+        reasons.append(
+            {
+                "code": "rare_recipient_region",
+                "type": "recipient",
+                "severity": min(1.0, features["novel_rare_region"] / 8.0),
+                "value": features["novel_rare_region"],
+                "text": "Регион получателя новый для клиента и редко встречается среди всех клиентов",
+            }
+        )
+    if features.get("novel_rare_category", 0.0) >= RARE_REGION_SURPRISAL:
+        reasons.append(
+            {
+                "code": "rare_category",
+                "type": "category",
+                "severity": min(1.0, features["novel_rare_category"] / 8.0),
+                "value": features["novel_rare_category"],
+                "text": f"Категория «{ctx['category']}» новая для клиента и редко встречается среди всех клиентов",
             }
         )
     if features["is_new_recipient"] > 0:

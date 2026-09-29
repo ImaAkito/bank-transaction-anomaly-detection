@@ -26,8 +26,23 @@ FEATURE_GROUPS: dict[str, list[str]] = {
         "is_new_currency",
     ],
     "history": ["log_history_len"],
+    # Редкость значения среди ВСЕХ клиентов (популяционные частоты из обучающего периода, без меток).
+    "population": [
+        "is_new_recipient_category",
+        "pop_category_surprisal",
+        "pop_region_surprisal",
+        "pop_channel_surprisal",
+        "novel_rare_category",
+        "novel_rare_region",
+    ],
 }
 FEATURE_NAMES: list[str] = [name for names in FEATURE_GROUPS.values() for name in names]
+# Группа «population» опциональна: она помогает на данных, где аномалии связаны с редкими значениями среди всех клиентов
+# (например, IBM), и разбавляет сигнал Isolation Forest на данных без такой связи. Включается через --feature-groups.
+OPTIONAL_GROUPS = {"population"}
+DEFAULT_FEATURE_NAMES: list[str] = [
+    name for group, names in FEATURE_GROUPS.items() if group not in OPTIONAL_GROUPS for name in names
+]
 # Признаки, не зависящие от профиля клиента (контекстно-независимая базовая модель).
 CONTEXT_FREE_FEATURES = ["log_amount", "hour_sin", "hour_cos", "is_night"]
 
@@ -55,6 +70,12 @@ FEATURE_LABELS_RU: dict[str, str] = {
     "is_new_channel": "Новый канал для клиента",
     "recipient_cat_freq": "Частота категории получателя у клиента",
     "is_new_recipient": "Новый получатель",
+    "is_new_recipient_category": "Новая категория получателя (регион) для клиента",
+    "pop_category_surprisal": "Редкость категории среди всех клиентов",
+    "pop_region_surprisal": "Редкость региона получателя среди всех клиентов",
+    "pop_channel_surprisal": "Редкость канала среди всех клиентов",
+    "novel_rare_category": "Новая для клиента и редкая среди всех категория",
+    "novel_rare_region": "Новый для клиента и редкий среди всех регион получателя",
     "currency_freq": "Частота валюты у клиента",
     "is_new_currency": "Новая валюта для клиента",
     "log_history_len": "Объём истории клиента",
@@ -80,12 +101,34 @@ def _smoothed(count: float, total: float, prior: float) -> float:
     return (count + SMOOTHING * prior) / (total + SMOOTHING)
 
 
+def fit_population(df) -> dict[str, Any]:
+    """Популяционные счётчики по DataFrame транзакций (колонки category, channel, recipient_category).
+
+    Считаются по обучающему периоду без использования меток и сохраняются в артефакте модели.
+    """
+    def counts(series) -> dict[str, int]:
+        return {str(k): int(v) for k, v in series.dropna().astype(str).str.strip().str.lower().value_counts().items()}
+
+    return {
+        "n": int(len(df)),
+        "categories": counts(df["category"]),
+        "channels": counts(df["channel"]),
+        "recipient_categories": counts(df["recipient_category"]),
+        "recipient_categories_n": int(df["recipient_category"].notna().sum()),
+    }
+
+
+def _surprisal(counts: dict[str, int], key: str, total: int) -> float:
+    """-ln частоты значения с добавлением 0,5 наблюдения (неизвестное значение получает высокую редкость)."""
+    return -math.log((counts.get(key, 0) + 0.5) / (total + 1.0))
+
+
 def _median(values: list[float]) -> float:
     return float(np.median(values)) if values else 0.0
 
 
 def compute_features(
-    profile: dict[str, Any], tx: Tx, min_history: int = 5
+    profile: dict[str, Any], tx: Tx, min_history: int = 5, population: dict[str, Any] | None = None
 ) -> tuple[dict[str, float], dict[str, Any]]:
     """Возвращает (признаки, контекст). Контекст нужен модулю интерпретации, в модель не подаётся."""
     n = profile["n"]
@@ -162,6 +205,17 @@ def compute_features(
     else:
         recipient_cat_freq = PRIORS["recipient_cat_freq"]
     new_recipient = bool(tx.recipient_id) and tx.recipient_id not in profile["recipients"]
+    new_region = bool(tx.recipient_category) and rc_count == 0
+
+    pop_category = pop_channel = pop_region = 0.0
+    if population and population.get("n"):
+        pop_category = _surprisal(population["categories"], tx.category, population["n"])
+        pop_channel = _surprisal(population["channels"], tx.channel, population["n"])
+        if tx.recipient_category and population.get("recipient_categories_n"):
+            pop_region = _surprisal(population["recipient_categories"], tx.recipient_category,
+                                    population["recipient_categories_n"])
+    new_category_flag = maturity if warm and cat_count == 0 else 0.0
+    new_region_flag = maturity if warm and new_region else 0.0
 
     features = {
         "log_amount": log_amount,
@@ -187,6 +241,12 @@ def compute_features(
         "is_new_channel": maturity if warm and chan_count == 0 else 0.0,
         "recipient_cat_freq": recipient_cat_freq,
         "is_new_recipient": maturity if warm and new_recipient else 0.0,
+        "is_new_recipient_category": new_region_flag,
+        "pop_category_surprisal": pop_category,
+        "pop_region_surprisal": pop_region,
+        "pop_channel_surprisal": pop_channel,
+        "novel_rare_category": new_category_flag * pop_category,
+        "novel_rare_region": new_region_flag * pop_region,
         "currency_freq": _smoothed(curr_count, n, PRIORS["currency_freq"]),
         "is_new_currency": maturity if warm and curr_count == 0 else 0.0,
         "log_history_len": math.log1p(n),
@@ -229,9 +289,9 @@ def should_hold(features: dict[str, float]) -> bool:
 
 
 def select_features(groups: str | None) -> list[str]:
-    """Список признаков по перечню групп через запятую (например, "amount,novelty"); пусто — все признаки."""
+    """Список признаков по перечню групп через запятую (например, "amount,novelty,population"); пусто — группы по умолчанию."""
     if not groups:
-        return list(FEATURE_NAMES)
+        return list(DEFAULT_FEATURE_NAMES)
     names = [g.strip() for g in groups.split(",") if g.strip()]
     unknown = [g for g in names if g not in FEATURE_GROUPS]
     if unknown:

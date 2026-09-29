@@ -132,3 +132,32 @@ def test_out_of_order_timestamp_is_handled():
     feed(profile, make_tx(ts=base))
     features, _ = compute_features(profile, make_tx(ts=base - timedelta(hours=1)))
     assert features["log_secs_since_last"] == 0.0
+
+
+def test_population_surprisal_and_novelty_interaction():
+    import pandas as pd
+
+    from app.domain.features import fit_population
+
+    rows = [{"category": "groceries", "channel": "card_pos", "recipient_category": "merchant"} for _ in range(990)]
+    rows += [{"category": "jewelry", "channel": "web", "recipient_category": "italy"} for _ in range(10)]
+    population = fit_population(pd.DataFrame(rows))
+    assert population["n"] == 1000 and population["recipient_categories"]["italy"] == 10
+
+    profile = new_profile()
+    for i in range(40):
+        feed(profile, make_tx(i, day=i // 4))  # клиент использует только «merchant»-получателей
+    common = make_tx(99, day=11)
+    rare = normalize(
+        {"transaction_id": "r", "client_id": "c", "timestamp": common.ts, "amount": 1000, "currency": "RUB",
+         "category": "jewelry", "channel": "web", "recipient_id": "x", "recipient_category": "italy"},
+        DEFAULT_CURRENCY_RATES,
+    )
+    f_common = compute_features(profile, common, population=population)[0]
+    f_rare = compute_features(profile, rare, population=population)[0]
+    assert f_rare["pop_region_surprisal"] > f_common["pop_region_surprisal"] + 3
+    assert f_rare["novel_rare_region"] > 3 and f_rare["novel_rare_category"] > 3
+    assert f_common["novel_rare_region"] == 0  # не новый для клиента: 'merchant' уже в профиле, а значение ниже
+    # без популяции признаки нейтральны
+    f_none = compute_features(profile, rare)[0]
+    assert f_none["pop_region_surprisal"] == 0 and f_none["novel_rare_region"] == 0
