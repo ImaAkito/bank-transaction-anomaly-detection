@@ -22,6 +22,7 @@ class ModelBundle:
     trained_at: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
+    population: dict[str, Any] = field(default_factory=dict)
     _explainer: Any = field(default=None, repr=False, compare=False)
 
     def raw_score(self, X: np.ndarray) -> np.ndarray:

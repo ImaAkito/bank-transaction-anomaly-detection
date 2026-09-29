@@ -31,3 +31,23 @@ def best_f1_threshold(y_true: np.ndarray, scores: np.ndarray) -> float:
     denominator = precision + recall
     f1 = np.divide(2 * precision * recall, denominator, out=np.zeros_like(denominator), where=denominator > 0)
     return float(s[int(np.argmax(f1))])
+
+
+BUDGETS = (0.001, 0.005, 0.01)
+
+
+def budget_metrics(y_true: np.ndarray, scores: np.ndarray, fractions=BUDGETS) -> dict[str, dict[str, float]]:
+    """Качество при фиксированном бюджете оповещений: специалист проверяет долю операций с наибольшей оценкой.
+
+    Порог берётся по распределению оценок, метки не используются, поэтому результат не зависит от
+    подбора порога на малой валидационной выборке.
+    """
+    y = np.asarray(y_true).astype(int)
+    order = np.argsort(-np.asarray(scores), kind="stable")
+    total_pos = max(int(y.sum()), 1)
+    result = {}
+    for fraction in fractions:
+        k = max(int(np.ceil(fraction * len(y))), 1)
+        hits = int(y[order[:k]].sum())
+        result[f"{fraction:g}"] = {"flagged": k, "true_positive": hits, "precision": hits / k, "recall": hits / total_pos}
+    return result

@@ -12,8 +12,8 @@ from pathlib import Path
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
-from app.domain.features import FEATURE_NAMES, select_features
-from app.ml.dataset import build_feature_frame, time_split
+from app.domain.features import DEFAULT_FEATURE_NAMES, select_features
+from app.ml.dataset import build_feature_frame, fit_population_on_train, time_split
 from app.ml.metrics import best_f1_threshold, evaluate
 from app.ml.model import ModelBundle, save_bundle, sigmoid_calibration
 from app.simulation.generator import generate_transactions
@@ -26,7 +26,7 @@ IF_GRID = {
     "max_features": [0.6, 1.0],
 }
 OPERATIONAL_QUANTILE = 0.98
-FEATURES: list[str] = list(FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
+FEATURES: list[str] = list(DEFAULT_FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
 
 
 def fit_isolation_forest(X: np.ndarray, seed: int, **params) -> IsolationForest:
@@ -123,7 +123,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-tune", action="store_true", help="пропустить подбор параметров")
-    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history")
+    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history,population (по умолчанию все, кроме population)")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
     parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
@@ -144,7 +144,8 @@ def main() -> None:
         log.info("Генерация данных: clients=%s days=%s seed=%s", args.clients, args.days, args.seed)
         df = generate_transactions(args.clients, args.days, args.seed)
     log.info("Транзакций: %s, доля аномалий: %.3f", len(df), df["is_anomaly"].mean())
-    frame = build_feature_frame(df)
+    population = fit_population_on_train(df)
+    frame = build_feature_frame(df, population=population)
     train, val, test = time_split(frame)
 
     if args.kind == "isolation_forest":
@@ -152,6 +153,7 @@ def main() -> None:
     else:
         bundle = train_lightgbm(train, val, test, args.seed)
 
+    bundle.population = population
     now = datetime.now(timezone.utc)
     bundle.trained_at = now.isoformat(timespec="seconds")
     bundle.version = f"{args.kind}-{now:%Y%m%d%H%M%S}"

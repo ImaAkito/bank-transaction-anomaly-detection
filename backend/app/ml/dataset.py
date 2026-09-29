@@ -21,6 +21,7 @@ def build_feature_frame(
     rates: dict[str, float] | None = None,
     min_history: int = 5,
     hold_policy: str = "rule",
+    population: dict | None = None,
 ) -> pd.DataFrame:
     rates = rates or DEFAULT_CURRENCY_RATES
     profiles: dict[str, dict] = {}
@@ -43,7 +44,7 @@ def build_feature_frame(
             rates,
         )
         profile = profiles.setdefault(tx.client_id, new_profile())
-        features, _ = compute_features(profile, tx, min_history)
+        features, _ = compute_features(profile, tx, min_history, population)
         is_anomaly = bool(row["is_anomaly"]) if has_labels else False
         records.append(
             {
@@ -68,6 +69,15 @@ def build_feature_frame(
     frame = pd.DataFrame.from_records(records, columns=META_COLUMNS + FEATURE_NAMES)
     frame["is_anomaly"] = frame["is_anomaly"].astype(bool)
     return frame
+
+
+def fit_population_on_train(df: pd.DataFrame, train_frac: float = 0.65) -> dict:
+    """Популяционные частоты по обучающему периоду (тому же, что даёт time_split), без меток."""
+    from app.domain.features import fit_population
+
+    ordered = df.sort_values("timestamp", kind="stable")
+    cutoff = int(len(ordered) * train_frac)
+    return fit_population(ordered.iloc[:cutoff])
 
 
 def time_split(frame: pd.DataFrame, train_frac: float = 0.65, val_frac: float = 0.15):

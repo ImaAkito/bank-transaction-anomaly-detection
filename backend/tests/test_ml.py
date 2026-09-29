@@ -28,7 +28,7 @@ def test_feature_frame_has_no_nans(small_frame):
 def test_bundle_roundtrip_and_score_range(model_path, small_frame, tmp_path):
     _, frame = small_frame
     bundle = load_bundle(model_path)
-    X = frame[FEATURE_NAMES].values[:500]
+    X = frame[bundle.feature_names].values[:500]
     scores = bundle.score(X)
     assert scores.shape == (500,) and scores.min() >= 0 and scores.max() <= 1
     save_bundle(bundle, tmp_path / "copy.joblib")
@@ -38,7 +38,7 @@ def test_bundle_roundtrip_and_score_range(model_path, small_frame, tmp_path):
 def test_model_separates_anomalies(model_path, small_frame):
     _, frame = small_frame
     bundle = load_bundle(model_path)
-    scores = bundle.score(frame[FEATURE_NAMES].values)
+    scores = bundle.score(frame[bundle.feature_names].values)
     metrics = evaluate(frame["is_anomaly"].values, scores, bundle.thresholds["medium"])
     assert metrics["roc_auc"] > 0.9 and metrics["pr_auc"] > 0.3
 
@@ -84,3 +84,15 @@ def test_best_f1_threshold():
     y = np.array([0, 0, 1, 1, 0, 1])
     s = np.array([0.1, 0.2, 0.9, 0.8, 0.3, 0.7])
     assert best_f1_threshold(y, s) == 0.7
+
+
+def test_budget_metrics_do_not_depend_on_threshold():
+    from app.ml.metrics import budget_metrics
+
+    y = np.zeros(1000, dtype=int)
+    y[[3, 10]] = 1
+    scores = np.linspace(0, 1, 1000)
+    scores[[3, 10]] = [2.0, 1.5]
+    result = budget_metrics(y, scores, fractions=(0.002, 0.01))
+    assert result["0.002"]["true_positive"] == 2 and result["0.002"]["precision"] == 1.0
+    assert result["0.01"]["recall"] == 1.0 and result["0.01"]["flagged"] == 10
