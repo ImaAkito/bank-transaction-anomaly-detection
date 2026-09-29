@@ -188,13 +188,15 @@ def shap_factors(
     try:
         x = np.array([[features[name] for name in bundle.feature_names]], dtype=float)
         contributions = bundle.shap_values(x)[0]
+        design = bundle.design_matrix(x)[0]
+        names = bundle.explain_names
     except Exception:  # SHAP не должен ломать обработку транзакции
         log.exception("Не удалось рассчитать SHAP-вклады")
         return []
     order = np.argsort(-np.abs(contributions))[:top_k]
     factors = []
     for idx in order:
-        name = bundle.feature_names[idx]
+        name = names[idx]
         value = float(contributions[idx])
         if abs(value) < 1e-9:
             continue
@@ -202,7 +204,7 @@ def shap_factors(
             {
                 "feature": name,
                 "label": FEATURE_LABELS_RU.get(name, name),
-                "value": float(features[name]),
+                "value": float(design[idx]),
                 "contribution": value,
                 "direction": "increases" if value > 0 else "decreases",
             }
