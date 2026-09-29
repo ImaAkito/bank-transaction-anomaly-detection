@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
-from app.domain.features import FEATURE_NAMES
+from app.domain.features import FEATURE_NAMES, select_features
 from app.ml.dataset import build_feature_frame, time_split
 from app.ml.metrics import best_f1_threshold, evaluate
 from app.ml.model import ModelBundle, save_bundle, sigmoid_calibration
@@ -26,6 +26,7 @@ IF_GRID = {
     "max_features": [0.6, 1.0],
 }
 OPERATIONAL_QUANTILE = 0.98
+FEATURES: list[str] = list(FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
 
 
 def fit_isolation_forest(X: np.ndarray, seed: int, **params) -> IsolationForest:
@@ -34,7 +35,7 @@ def fit_isolation_forest(X: np.ndarray, seed: int, **params) -> IsolationForest:
 
 def tune_isolation_forest(train, val, seed: int) -> tuple[dict, list[dict]]:
     """Перебор параметров по PR-AUC на валидационной выборке (обучение на train без меток)."""
-    Xtr, Xva, yva = train[FEATURE_NAMES].values, val[FEATURE_NAMES].values, val["is_anomaly"].values
+    Xtr, Xva, yva = train[FEATURES].values, val[FEATURES].values, val["is_anomaly"].values
     results = []
     keys = list(IF_GRID)
     for combo in itertools.product(*(IF_GRID[k] for k in keys)):
@@ -56,16 +57,16 @@ def train_isolation_forest(train, val, test, seed: int, tune: bool) -> ModelBund
     import pandas as pd
 
     fit_frame = pd.concat([train, val], ignore_index=True)
-    model = fit_isolation_forest(fit_frame[FEATURE_NAMES].values, seed, **params)
-    raw_fit = -model.score_samples(fit_frame[FEATURE_NAMES].values)
+    model = fit_isolation_forest(fit_frame[FEATURES].values, seed, **params)
+    raw_fit = -model.score_samples(fit_frame[FEATURES].values)
     calibration = sigmoid_calibration(raw_fit)
     bundle = ModelBundle(
         kind="isolation_forest",
         model=model,
-        feature_names=list(FEATURE_NAMES),
+        feature_names=list(FEATURES),
         calibration=calibration,
     )
-    scores = bundle.score(test[FEATURE_NAMES].values)
+    scores = bundle.score(test[FEATURES].values)
     metrics = evaluate(test["is_anomaly"].values, scores, bundle.thresholds["medium"])
     bundle.params = params
     bundle.metrics = {"test": metrics, "search": search, "train_rows": len(fit_frame), "test_rows": len(test)}
@@ -80,7 +81,11 @@ def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
         "n_estimators": 400,
         "learning_rate": 0.05,
         "num_leaves": 31,
-        "scale_pos_weight": (len(train) - pos) / pos,
+        # Для сверхредкого класса полный вес (neg/pos) усиливает шум; берём корень.
+        "scale_pos_weight": max(((len(train) - pos) / pos) ** 0.5, 1.0),
+        "num_leaves": 15,
+        "min_child_samples": 100,
+        "reg_lambda": 5.0,
         "subsample": 0.8,
         "subsample_freq": 1,
         "colsample_bytree": 0.8,
@@ -89,22 +94,22 @@ def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
     }
     model = lgb.LGBMClassifier(**params)
     model.fit(
-        train[FEATURE_NAMES].values,
+        train[FEATURES].values,
         train["is_anomaly"].values.astype(int),
-        eval_set=[(val[FEATURE_NAMES].values, val["is_anomaly"].values.astype(int))],
+        eval_set=[(val[FEATURES].values, val["is_anomaly"].values.astype(int))],
         callbacks=[lgb.early_stopping(30, verbose=False)],
     )
     bundle = ModelBundle(
         kind="lightgbm",
         model=model,
-        feature_names=list(FEATURE_NAMES),
+        feature_names=list(FEATURES),
         calibration={"type": "probability"},
     )
-    val_scores = bundle.score(val[FEATURE_NAMES].values)
+    val_scores = bundle.score(val[FEATURES].values)
     medium = best_f1_threshold(val["is_anomaly"].values, val_scores)
     high = max(medium, min(0.95, (1.0 + medium) / 2))
     bundle.thresholds = {"medium": float(medium), "high": float(high)}
-    metrics = evaluate(test["is_anomaly"].values, bundle.score(test[FEATURE_NAMES].values), medium)
+    metrics = evaluate(test["is_anomaly"].values, bundle.score(test[FEATURES].values), medium)
     bundle.params = {k: v for k, v in params.items() if k != "verbose"}
     bundle.metrics = {"test": metrics, "train_rows": len(train), "test_rows": len(test)}
     return bundle
@@ -118,12 +123,15 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-tune", action="store_true", help="пропустить подбор параметров")
+    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
     parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
     parser.add_argument("--ibm-from-year", type=int, default=2010)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    FEATURES[:] = select_features(args.feature_groups)
+    log.info("Признаков: %s (%s)", len(FEATURES), args.feature_groups or "все группы")
 
     if args.dataset == "ibm":
         if not args.ibm_path:

@@ -228,6 +228,17 @@ def should_hold(features: dict[str, float]) -> bool:
     return features["log_ratio_median"] >= math.log(HOLD_RATIO) or features["tx_count_1h"] >= HOLD_BURST_COUNT
 
 
+def select_features(groups: str | None) -> list[str]:
+    """Список признаков по перечню групп через запятую (например, "amount,novelty"); пусто — все признаки."""
+    if not groups:
+        return list(FEATURE_NAMES)
+    names = [g.strip() for g in groups.split(",") if g.strip()]
+    unknown = [g for g in names if g not in FEATURE_GROUPS]
+    if unknown:
+        raise ValueError(f"Неизвестные группы признаков: {unknown}; доступны: {list(FEATURE_GROUPS)}")
+    return [f for f in FEATURE_NAMES if any(f in FEATURE_GROUPS[g] for g in names)]
+
+
 def to_vector(features: dict[str, float], names: list[str] | None = None) -> np.ndarray:
     names = names or FEATURE_NAMES
     return np.array([[features[name] for name in names]], dtype=float)
