@@ -31,13 +31,14 @@ from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 
-from app.domain.features import CONTEXT_FREE_FEATURES, FEATURE_GROUPS, FEATURE_NAMES
+from app.domain.features import CONTEXT_FREE_FEATURES, FEATURE_GROUPS, FEATURE_NAMES, select_features
 from app.ml.dataset import build_feature_frame, time_split
 from app.ml.metrics import best_f1_threshold, evaluate
 from app.simulation.generator import generate_transactions
 
 log = logging.getLogger("experiments")
 
+FEATURES: list[str] = list(FEATURE_NAMES)  # активный набор признаков; main() может сузить его по группам
 LABEL_FREE_QUANTILE = 0.98
 UNSUPERVISED_SUBSAMPLE = {"lof": 15000, "ocsvm": 8000}
 
@@ -138,8 +139,9 @@ def fit_xgboost(Xtr, ytr, Xva, yva, seed) -> Fitted:
 
     t0 = time.perf_counter()
     pos = max(int(ytr.sum()), 1)
-    params = {"n_estimators": 400, "learning_rate": 0.05, "max_depth": 5, "subsample": 0.8, "colsample_bytree": 0.8,
-              "scale_pos_weight": float((len(ytr) - pos) / pos)}
+    params = {"n_estimators": 400, "learning_rate": 0.05, "max_depth": 4, "min_child_weight": 5, "subsample": 0.8,
+              "colsample_bytree": 0.8, "reg_lambda": 5.0,
+              "scale_pos_weight": float(max(((len(ytr) - pos) / pos) ** 0.5, 1.0))}
     model = xgb.XGBClassifier(**params, random_state=seed, n_jobs=-1, eval_metric="aucpr", early_stopping_rounds=30)
     model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
     params["best_iteration"] = int(model.best_iteration)
@@ -151,8 +153,9 @@ def fit_lightgbm(Xtr, ytr, Xva, yva, seed) -> Fitted:
 
     t0 = time.perf_counter()
     pos = max(int(ytr.sum()), 1)
-    params = {"n_estimators": 400, "learning_rate": 0.05, "num_leaves": 31, "subsample": 0.8, "subsample_freq": 1,
-              "colsample_bytree": 0.8, "scale_pos_weight": float((len(ytr) - pos) / pos)}
+    params = {"n_estimators": 400, "learning_rate": 0.05, "num_leaves": 15, "min_child_samples": 100,
+              "reg_lambda": 5.0, "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.8,
+              "scale_pos_weight": float(max(((len(ytr) - pos) / pos) ** 0.5, 1.0))}
     model = lgb.LGBMClassifier(**params, random_state=seed, verbose=-1, n_jobs=-1)
     model.fit(Xtr, ytr, eval_set=[(Xva, yva)], callbacks=[lgb.early_stopping(30, verbose=False)])
     params["best_iteration"] = int(model.best_iteration_)
@@ -203,10 +206,12 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
     def matrices(columns):
         return train[columns].values, val[columns].values, test[columns].values
 
-    Xtr, Xva, Xte = matrices(FEATURE_NAMES)
+    Xtr, Xva, Xte = matrices(FEATURES)
     models: dict[str, dict] = {}
 
-    def run(fitted: Fitted, columns=None, matrices_=None):
+    def run(fitted: Fitted | None, columns=None, matrices_=None):
+        if fitted is None:
+            return
         a, b, c = matrices_ or (Xtr, Xva, Xte)
         log.info("seed %s: %s (%.1f с)", seed, fitted.name, fitted.fit_seconds)
         models[fitted.name] = assess(fitted, a, b, yva, c, yte, test_types)
@@ -223,7 +228,7 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
         run(fit_elliptic(Xtr, seed))
     except Exception as exc:  # вырожденная ковариация допустима для отдельных наборов признаков
         log.warning("Elliptic Envelope пропущен: %s", exc)
-    run(fit_zscore_rule(Xtr, FEATURE_NAMES))
+    run(fit_zscore_rule(Xtr, FEATURES) if "amount_zscore" in FEATURES else None)
     run(fit_logreg(Xtr, ytr, seed))
     run(fit_xgboost(Xtr, ytr, Xva, yva, seed))
     run(fit_lightgbm(Xtr, ytr, Xva, yva, seed))
@@ -238,14 +243,17 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
         ablation[label] = {"n_features": len(columns), "roc_auc": r["roc_auc"], "pr_auc": r["pr_auc"],
                            "label_free_threshold": r["label_free_threshold"]}
 
-    ablate("Все признаки", FEATURE_NAMES)
+    ablate("Все признаки", FEATURES)
     for group, cols in FEATURE_GROUPS.items():
-        ablate(f"Без группы «{group}»", [c for c in FEATURE_NAMES if c not in cols])
+        if set(cols) & set(FEATURES) and set(FEATURES) - set(cols):
+            ablate(f"Без группы «{group}»", [c for c in FEATURES if c not in cols])
+    context_free = [c for c in CONTEXT_FREE_FEATURES if c in FEATURES]
     for group, cols in FEATURE_GROUPS.items():
-        if group != "history":
-            ablate(f"Только «{group}» + сумма/время", sorted(set(cols) | set(CONTEXT_FREE_FEATURES),
-                                                            key=FEATURE_NAMES.index))
-    ablate("Без профиля клиента (сумма и время)", CONTEXT_FREE_FEATURES)
+        if group != "history" and set(cols) & set(FEATURES) and context_free:
+            keep = set(cols) | set(context_free)
+            ablate(f"Только «{group}» + сумма/время", [c for c in FEATURES if c in keep])
+    if context_free:
+        ablate("Без профиля клиента (сумма и время)", context_free)
 
     curves = {name: r["_scores"] for name, r in models.items()}
     for r in models.values():
@@ -411,6 +419,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
     parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
@@ -419,6 +428,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
     warnings.filterwarnings("ignore", category=DeprecationWarning)
+    FEATURES[:] = select_features(args.feature_groups)
+    log.info("Признаков: %s (%s)", len(FEATURES), args.feature_groups or "все группы")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
