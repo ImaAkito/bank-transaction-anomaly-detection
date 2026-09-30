@@ -181,11 +181,22 @@ def fit_lgbm_time_cv(Xtr, ytr, timestamps, seed) -> Fitted:
                   time.perf_counter() - t0)
 
 
-def fit_hybrid(Xtr, ytr, timestamps, forest: Fitted, seed) -> Fitted:
+def fit_monotone_lgbm(Xtr, ytr, timestamps, columns, seed) -> Fitted:
+    """LightGBM с монотонными ограничениями: редкость и новизна могут только повышать оценку."""
+    t0 = time.perf_counter()
+    model, report = select_and_fit_lgbm(Xtr, ytr, timestamps, seed, columns, monotone=True)
+    return Fitted("LightGBM монотонный", True, lambda X: model.predict_proba(X)[:, 1],
+                  {"depth": report["depth"], "n_estimators": report["n_estimators"], "cv_pr_auc": report["cv_pr_auc"]},
+                  time.perf_counter() - t0)
+
+
+def fit_hybrid(Xtr, ytr, timestamps, forest: Fitted, seed, columns=None, monotone: bool = False) -> Fitted:
     """Гибрид: оценка Isolation Forest (без меток) подаётся в LightGBM как дополнительный признак."""
     t0 = time.perf_counter()
-    model, report = select_and_fit_lgbm(hybrid_matrix(Xtr, forest.score(Xtr)), ytr, timestamps, seed)
-    return Fitted("Гибрид: LightGBM + Isolation Forest", True,
+    names = list(columns) + ["iforest_score"] if columns is not None else None
+    model, report = select_and_fit_lgbm(hybrid_matrix(Xtr, forest.score(Xtr)), ytr, timestamps, seed, names, monotone)
+    title = "Гибрид монотонный" if monotone else "Гибрид: LightGBM + Isolation Forest"
+    return Fitted(title, True,
                   lambda X: model.predict_proba(hybrid_matrix(X, forest.score(X)))[:, 1],
                   {"depth": report["depth"], "n_estimators": report["n_estimators"], "cv_pr_auc": report["cv_pr_auc"]},
                   time.perf_counter() - t0 + forest.fit_seconds)
@@ -265,6 +276,8 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
     run(fit_lightgbm(Xtr, ytr, Xva, yva, seed))
     run(fit_lgbm_time_cv(Xtr, ytr, train["timestamp"].values, seed))
     run(fit_hybrid(Xtr, ytr, train["timestamp"].values, forest, seed))
+    run(fit_monotone_lgbm(Xtr, ytr, train["timestamp"].values, FEATURES, seed))
+    run(fit_hybrid(Xtr, ytr, train["timestamp"].values, forest, seed, FEATURES, monotone=True))
 
     # Влияние групп признаков: Isolation Forest с фиксированными параметрами.
     ablation: dict[str, dict] = {}

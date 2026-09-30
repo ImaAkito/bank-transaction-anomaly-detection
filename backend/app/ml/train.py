@@ -74,6 +74,7 @@ def train_isolation_forest(train, val, test, seed: int, tune: bool) -> ModelBund
     return bundle
 
 
+MONOTONE = False  # --monotone: монотонные ограничения бустинга
 ALERT_BUDGET_MEDIUM = 0.01   # доля операций со средним и высоким риском
 ALERT_BUDGET_HIGH = 0.002    # доля операций с высоким риском
 
@@ -101,7 +102,8 @@ def _finish_supervised(bundle: ModelBundle, X_val: np.ndarray, test, train_rows:
 def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
     """LightGBM: глубина и число деревьев по хронологическим окнам, пороги по бюджету оповещений."""
     model, report = select_and_fit_lgbm(
-        train[FEATURES].values, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed
+        train[FEATURES].values, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed,
+        FEATURES, monotone=MONOTONE,
     )
     bundle = ModelBundle(kind="lightgbm", model=model, feature_names=list(FEATURES), calibration={"type": "probability"})
     bundle.params = {"max_depth": report["depth"], "n_estimators": report["n_estimators"]}
@@ -115,7 +117,10 @@ def train_hybrid(train, val, test, seed: int, tune: bool) -> ModelBundle:
         params, _ = tune_isolation_forest(train, val, seed)
     forest = fit_isolation_forest(train[FEATURES].values, seed, **params)
     X_train = hybrid_matrix(train[FEATURES].values, -forest.score_samples(train[FEATURES].values))
-    gbm, report = select_and_fit_lgbm(X_train, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed)
+    gbm, report = select_and_fit_lgbm(
+        X_train, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed,
+        FEATURES + ["iforest_score"], monotone=MONOTONE,
+    )
     bundle = ModelBundle(
         kind="hybrid", model={"forest": forest, "gbm": gbm}, feature_names=list(FEATURES),
         calibration={"type": "probability"},
@@ -133,6 +138,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-tune", action="store_true", help="пропустить подбор параметров")
     parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history,population (по умолчанию все, кроме population)")
+    parser.add_argument("--monotone", action="store_true",
+                        help="для lightgbm/hybrid: редкость и новизна могут только повышать оценку")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
     parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
@@ -140,6 +147,8 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     FEATURES[:] = select_features(args.feature_groups)
+    global MONOTONE
+    MONOTONE = args.monotone
     log.info("Признаков: %s (%s)", len(FEATURES), args.feature_groups or "все группы")
 
     if args.dataset == "ibm":

@@ -136,3 +136,10 @@ def test_supervised_and_hybrid_bundles(small_frame, tmp_path):
         factors = shap_factors(loaded, {name: float(row[name]) for name in FEATURES})
         assert factors and all(f["feature"] in loaded.explain_names for f in factors)
     assert "iforest_score" in loaded.explain_names and loaded.explain_names[-1] == "iforest_score"
+
+
+def test_monotone_constraints_follow_feature_names():
+    from app.ml.gbm import monotone_constraints
+
+    assert monotone_constraints(["log_amount", "pop_region_surprisal", "category_freq", "iforest_score"]) == [0, 1, -1, 1]
+    assert monotone_constraints(None) is None
