@@ -14,7 +14,8 @@ from sklearn.ensemble import IsolationForest
 
 from app.domain.features import DEFAULT_FEATURE_NAMES, select_features
 from app.ml.dataset import build_feature_frame, fit_population_on_train, time_split
-from app.ml.metrics import best_f1_threshold, evaluate
+from app.ml.gbm import hybrid_matrix, select_and_fit_lgbm
+from app.ml.metrics import budget_metrics, evaluate
 from app.ml.model import ModelBundle, save_bundle, sigmoid_calibration
 from app.simulation.generator import generate_transactions
 
@@ -73,51 +74,59 @@ def train_isolation_forest(train, val, test, seed: int, tune: bool) -> ModelBund
     return bundle
 
 
-def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
-    import lightgbm as lgb
+ALERT_BUDGET_MEDIUM = 0.01   # доля операций со средним и высоким риском
+ALERT_BUDGET_HIGH = 0.002    # доля операций с высоким риском
 
-    pos = max(int(train["is_anomaly"].sum()), 1)
-    params = {
-        "n_estimators": 400,
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        # Для сверхредкого класса полный вес (neg/pos) усиливает шум; берём корень.
-        "scale_pos_weight": max(((len(train) - pos) / pos) ** 0.5, 1.0),
-        "num_leaves": 15,
-        "min_child_samples": 100,
-        "reg_lambda": 5.0,
-        "subsample": 0.8,
-        "subsample_freq": 1,
-        "colsample_bytree": 0.8,
-        "random_state": seed,
-        "verbose": -1,
+
+def _budget_thresholds(val_scores: np.ndarray) -> dict[str, float]:
+    """Пороги риска по бюджету оповещений: квантили оценок на валидации, метки не используются."""
+    medium = float(np.quantile(val_scores, 1.0 - ALERT_BUDGET_MEDIUM))
+    high = float(np.quantile(val_scores, 1.0 - ALERT_BUDGET_HIGH))
+    return {"medium": medium, "high": max(high, medium)}
+
+
+def _finish_supervised(bundle: ModelBundle, X_val: np.ndarray, test, train_rows: int, report: dict) -> ModelBundle:
+    bundle.thresholds = _budget_thresholds(bundle.score(X_val))
+    test_scores = bundle.score(test[FEATURES].values)
+    bundle.metrics = {
+        "test": evaluate(test["is_anomaly"].values, test_scores, bundle.thresholds["medium"]),
+        "budget": budget_metrics(test["is_anomaly"].values, test_scores),
+        "selection": report,
+        "train_rows": train_rows,
+        "test_rows": len(test),
     }
-    model = lgb.LGBMClassifier(**params)
-    model.fit(
-        train[FEATURES].values,
-        train["is_anomaly"].values.astype(int),
-        eval_set=[(val[FEATURES].values, val["is_anomaly"].values.astype(int))],
-        callbacks=[lgb.early_stopping(30, verbose=False)],
+    return bundle
+
+
+def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
+    """LightGBM: глубина и число деревьев по хронологическим окнам, пороги по бюджету оповещений."""
+    model, report = select_and_fit_lgbm(
+        train[FEATURES].values, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed
     )
+    bundle = ModelBundle(kind="lightgbm", model=model, feature_names=list(FEATURES), calibration={"type": "probability"})
+    bundle.params = {"max_depth": report["depth"], "n_estimators": report["n_estimators"]}
+    return _finish_supervised(bundle, val[FEATURES].values, test, len(train), report)
+
+
+def train_hybrid(train, val, test, seed: int, tune: bool) -> ModelBundle:
+    """Гибрид: оценка Isolation Forest (обучен без меток) подаётся в LightGBM как дополнительный признак."""
+    params = {"n_estimators": 200, "max_samples": 512, "max_features": 0.6}
+    if tune:
+        params, _ = tune_isolation_forest(train, val, seed)
+    forest = fit_isolation_forest(train[FEATURES].values, seed, **params)
+    X_train = hybrid_matrix(train[FEATURES].values, -forest.score_samples(train[FEATURES].values))
+    gbm, report = select_and_fit_lgbm(X_train, train["is_anomaly"].values.astype(int), train["timestamp"].values, seed)
     bundle = ModelBundle(
-        kind="lightgbm",
-        model=model,
-        feature_names=list(FEATURES),
+        kind="hybrid", model={"forest": forest, "gbm": gbm}, feature_names=list(FEATURES),
         calibration={"type": "probability"},
     )
-    val_scores = bundle.score(val[FEATURES].values)
-    medium = best_f1_threshold(val["is_anomaly"].values, val_scores)
-    high = max(medium, min(0.95, (1.0 + medium) / 2))
-    bundle.thresholds = {"medium": float(medium), "high": float(high)}
-    metrics = evaluate(test["is_anomaly"].values, bundle.score(test[FEATURES].values), medium)
-    bundle.params = {k: v for k, v in params.items() if k != "verbose"}
-    bundle.metrics = {"test": metrics, "train_rows": len(train), "test_rows": len(test)}
-    return bundle
+    bundle.params = {"forest": params, "max_depth": report["depth"], "n_estimators": report["n_estimators"]}
+    return _finish_supervised(bundle, val[FEATURES].values, test, len(train), report)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kind", choices=["isolation_forest", "lightgbm"], default="isolation_forest")
+    parser.add_argument("--kind", choices=["isolation_forest", "lightgbm", "hybrid"], default="isolation_forest")
     parser.add_argument("--out", default="models/model.joblib")
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--days", type=int, default=60)
@@ -150,6 +159,8 @@ def main() -> None:
 
     if args.kind == "isolation_forest":
         bundle = train_isolation_forest(train, val, test, args.seed, tune=not args.no_tune)
+    elif args.kind == "hybrid":
+        bundle = train_hybrid(train, val, test, args.seed, tune=not args.no_tune)
     else:
         bundle = train_lightgbm(train, val, test, args.seed)
 

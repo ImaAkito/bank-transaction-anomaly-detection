@@ -13,7 +13,7 @@ DEFAULT_THRESHOLDS = {"medium": 0.6, "high": 0.85}
 
 @dataclass
 class ModelBundle:
-    kind: str  # isolation_forest | lightgbm
+    kind: str  # isolation_forest | lightgbm | hybrid
     model: Any
     feature_names: list[str]
     calibration: dict[str, Any]
@@ -25,12 +25,27 @@ class ModelBundle:
     population: dict[str, Any] = field(default_factory=dict)
     _explainer: Any = field(default=None, repr=False, compare=False)
 
+    @property
+    def explain_names(self) -> list[str]:
+        """Имена столбцов, по которым считаются SHAP-вклады (у гибрида добавлена оценка Isolation Forest)."""
+        return self.feature_names + (["iforest_score"] if self.kind == "hybrid" else [])
+
+    def design_matrix(self, X: np.ndarray) -> np.ndarray:
+        """Матрица, подаваемая в бустинг: у гибрида к признакам добавляется оценка Isolation Forest."""
+        if self.kind == "hybrid":
+            from app.ml.gbm import hybrid_matrix
+
+            return hybrid_matrix(X, -self.model["forest"].score_samples(X))
+        return X
+
     def raw_score(self, X: np.ndarray) -> np.ndarray:
         """Необработанная оценка, большее значение означает более аномальную операцию."""
         if self.kind == "isolation_forest":
             return -self.model.score_samples(X)
         if self.kind == "lightgbm":
             return self.model.predict_proba(X)[:, 1]
+        if self.kind == "hybrid":
+            return self.model["gbm"].predict_proba(self.design_matrix(X))[:, 1]
         raise ValueError(f"Неизвестный тип модели: {self.kind}")
 
     def score(self, X: np.ndarray) -> np.ndarray:
@@ -55,12 +70,12 @@ class ModelBundle:
         if self._explainer is None:
             import shap
 
-            self._explainer = shap.TreeExplainer(self.model)
+            self._explainer = shap.TreeExplainer(self.model["gbm"] if self.kind == "hybrid" else self.model)
         return self._explainer
 
     def shap_values(self, X: np.ndarray) -> np.ndarray:
         """SHAP-значения в терминах «вклад в аномальность»: положительное значение повышает оценку."""
-        values = self.explainer().shap_values(X)
+        values = self.explainer().shap_values(self.design_matrix(X))
         if isinstance(values, list):  # старые версии shap возвращают список по классам
             values = values[-1]
         values = np.asarray(values)

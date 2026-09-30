@@ -96,3 +96,43 @@ def test_budget_metrics_do_not_depend_on_threshold():
     result = budget_metrics(y, scores, fractions=(0.002, 0.01))
     assert result["0.002"]["true_positive"] == 2 and result["0.002"]["precision"] == 1.0
     assert result["0.01"]["recall"] == 1.0 and result["0.01"]["flagged"] == 10
+
+
+def test_time_folds_are_expanding_and_chronological():
+    from app.ml.gbm import time_folds
+
+    stamps = np.arange(1000)[::-1].copy()  # порядок в массиве не совпадает с хронологическим
+    folds = time_folds(stamps, n_chunks=5, min_train_chunks=2)
+    assert len(folds) == 3
+    for train_idx, val_idx in folds:
+        assert stamps[train_idx].max() < stamps[val_idx].min()
+    assert len(folds[0][0]) == 400 and len(folds[-1][0]) == 800
+
+
+def test_supervised_and_hybrid_bundles(small_frame, tmp_path):
+    from app.domain.features import DEFAULT_FEATURE_NAMES
+    from app.ml.dataset import time_split
+    from app.ml.model import load_bundle, save_bundle
+    from app.ml.train import FEATURES, train_hybrid, train_lightgbm
+
+    FEATURES[:] = DEFAULT_FEATURE_NAMES
+    _, frame = small_frame
+    train, val, test = time_split(frame)
+    for kind, bundle in (("lightgbm", train_lightgbm(train, val, test, seed=1)),
+                         ("hybrid", train_hybrid(train, val, test, seed=1, tune=False))):
+        assert bundle.kind == kind
+        # пороги задаются бюджетом оповещений, а не максимумом F1 на валидации
+        share = (bundle.score(val[FEATURES].values) >= bundle.thresholds["medium"]).mean()
+        assert 0.005 <= share <= 0.03
+        assert bundle.thresholds["high"] >= bundle.thresholds["medium"]
+        scores = bundle.score(test[FEATURES].values)
+        assert evaluate(test["is_anomaly"].values, scores, bundle.thresholds["medium"])["roc_auc"] > 0.8
+
+        save_bundle(bundle, tmp_path / f"{kind}.joblib")
+        loaded = load_bundle(tmp_path / f"{kind}.joblib")
+        assert np.allclose(loaded.score(test[FEATURES].values[:200]), scores[:200])
+
+        row = test.loc[test["is_anomaly"]].iloc[0]
+        factors = shap_factors(loaded, {name: float(row[name]) for name in FEATURES})
+        assert factors and all(f["feature"] in loaded.explain_names for f in factors)
+    assert "iforest_score" in loaded.explain_names and loaded.explain_names[-1] == "iforest_score"
