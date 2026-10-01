@@ -22,8 +22,16 @@ def build_feature_frame(
     min_history: int = 5,
     hold_policy: str = "rule",
     population: dict | None = None,
+    population_mode: str = "fixed",
 ) -> pd.DataFrame:
+    """population_mode: «fixed» — популяционные частоты из обучающего периода (как в эксплуатации, хранятся
+    в артефакте модели); «causal» — частоты по всем операциям строго до текущей (без заглядывания в будущее,
+    одинаково для обучающих и тестовых строк)."""
     rates = rates or DEFAULT_CURRENCY_RATES
+    running = None
+    if population_mode == "causal":
+        running = {"n": 0, "categories": {}, "channels": {}, "recipient_categories": {}, "recipient_categories_n": 0}
+        population = running
     profiles: dict[str, dict] = {}
     records: list[dict] = []
     has_labels = "is_anomaly" in df.columns
@@ -40,11 +48,20 @@ def build_feature_frame(
                 "channel": row["channel"],
                 "recipient_id": row.get("recipient_id"),
                 "recipient_category": row.get("recipient_category"),
+                "timezone": row.get("timezone"),
             },
             rates,
         )
         profile = profiles.setdefault(tx.client_id, new_profile())
         features, _ = compute_features(profile, tx, min_history, population)
+        if running is not None:
+            running["n"] += 1
+            running["categories"][tx.category] = running["categories"].get(tx.category, 0) + 1
+            running["channels"][tx.channel] = running["channels"].get(tx.channel, 0) + 1
+            if tx.recipient_category:
+                running["recipient_categories_n"] += 1
+                rc = running["recipient_categories"]
+                rc[tx.recipient_category] = rc.get(tx.recipient_category, 0) + 1
         is_anomaly = bool(row["is_anomaly"]) if has_labels else False
         records.append(
             {

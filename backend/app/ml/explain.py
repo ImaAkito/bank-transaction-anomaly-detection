@@ -30,6 +30,11 @@ def _num(value: float, digits: int = 1) -> str:
     return text
 
 
+def _tz_suffix(ctx: dict[str, Any]) -> str:
+    tz = ctx.get("timezone") or "UTC"
+    return " UTC" if tz == "UTC" else f" по местному времени, {tz}"
+
+
 def _severity_from_ratio(ratio: float, ceiling: float) -> float:
     return float(min(1.0, max(0.0, math.log(max(ratio, 1.0)) / math.log(ceiling))))
 
@@ -83,7 +88,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "time",
                 "severity": 0.9 if features["is_night"] else 0.7,
                 "value": ctx["hour"],
-                "text": f"Операция выполнена в нетипичное для клиента время ({ctx['hour']:02d}:00; "
+                "text": f"Операция выполнена в нетипичное для клиента время ({ctx['hour']:02d}:00{_tz_suffix(ctx)}; "
                 f"в этот час приходилось {_num(share * 100, 1)}% его операций)",
             }
         )

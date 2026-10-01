@@ -88,47 +88,62 @@ def _select_users(users: pd.Series, fraction: float, seed: int) -> pd.Series:
     return ((users.astype("int64") * 2654435761 + seed * 40503) % 1000) < int(fraction * 1000)
 
 
+def normalize_chunk(chunk: pd.DataFrame, user_fraction: float, from_year: int, seed: int) -> tuple[pd.DataFrame, int]:
+    """Приводит часть файла IBM к формату проекта. Возвращает (строки, число отброшенных возвратов)."""
+    chunk = _normalize_columns(chunk)
+    required = {"user", "year", "month", "day", "time", "amount", "use_chip", "merchant_name", "mcc", "is_fraud"}
+    missing = required - set(chunk.columns)
+    if missing:
+        raise ValueError(f"В файле нет колонок: {sorted(missing)}")
+    chunk = chunk[_select_users(chunk["user"], user_fraction, seed) & (chunk["year"].astype(int) >= from_year)]
+    if chunk.empty:
+        return pd.DataFrame(columns=[c for c in COLUMNS if c != "transaction_id"]), 0
+    amount = pd.to_numeric(chunk["amount"].str.replace(r"[$,\s]", "", regex=True), errors="coerce")
+    keep = amount > 0
+    dropped = int((~keep).sum())
+    chunk, amount = chunk[keep], amount[keep]
+    timestamp = pd.to_datetime(
+        chunk["year"] + "-" + chunk["month"].str.zfill(2) + "-" + chunk["day"].str.zfill(2) + " " + chunk["time"],
+        utc=True,
+    )
+    state = chunk["merchant_state"].str.strip().str.lower() if "merchant_state" in chunk else pd.Series("", index=chunk.index)
+    is_fraud = chunk["is_fraud"].str.strip().str.lower().eq("yes")
+    out = pd.DataFrame(
+        {
+            "client_id": "U" + chunk["user"].str.zfill(5),
+            "timestamp": timestamp,
+            "amount": amount.round(2),
+            "currency": "USD",
+            "category": chunk["mcc"].map(mcc_to_category),
+            "recipient_id": "M" + chunk["merchant_name"],
+            "recipient_category": state.where(state != "", "online"),
+            "channel": chunk["use_chip"].map(_channel),
+            "is_anomaly": is_fraud,
+            "anomaly_type": is_fraud.map({True: "fraud", False: ""}),
+        }
+    )
+    return out, dropped
+
+
+def iter_ibm(path: str | Path, user_fraction: float = 1.0, from_year: int = 0, seed: int = 42,
+             chunksize: int = 1_000_000):
+    """Потоковое чтение файла IBM частями (для полного объёма)."""
+    for chunk in pd.read_csv(path, chunksize=chunksize, dtype=str, keep_default_na=False):
+        rows, dropped = normalize_chunk(chunk, user_fraction, from_year, seed)
+        yield rows, dropped
+
+
 def load_ibm(path: str | Path, user_fraction: float = 0.05, from_year: int = 2010, seed: int = 42,
              chunksize: int = 1_000_000) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     dropped_refunds = 0
-    for chunk in pd.read_csv(path, chunksize=chunksize, dtype=str, keep_default_na=False):
-        chunk = _normalize_columns(chunk)
-        required = {"user", "year", "month", "day", "time", "amount", "use_chip", "merchant_name", "mcc", "is_fraud"}
-        missing = required - set(chunk.columns)
-        if missing:
-            raise ValueError(f"В файле нет колонок: {sorted(missing)}")
-        chunk = chunk[_select_users(chunk["user"], user_fraction, seed) & (chunk["year"].astype(int) >= from_year)]
-        if chunk.empty:
-            continue
-        amount = pd.to_numeric(chunk["amount"].str.replace(r"[$,\s]", "", regex=True), errors="coerce")
-        keep = amount > 0
-        dropped_refunds += int((~keep).sum())
-        chunk, amount = chunk[keep], amount[keep]
-        timestamp = pd.to_datetime(
-            chunk["year"] + "-" + chunk["month"].str.zfill(2) + "-" + chunk["day"].str.zfill(2) + " " + chunk["time"],
-            utc=True,
-        )
-        state = chunk["merchant_state"].str.strip().str.lower() if "merchant_state" in chunk else pd.Series("", index=chunk.index)
-        parts.append(
-            pd.DataFrame(
-                {
-                    "client_id": "U" + chunk["user"].str.zfill(5),
-                    "timestamp": timestamp,
-                    "amount": amount.round(2),
-                    "currency": "USD",
-                    "category": chunk["mcc"].map(mcc_to_category),
-                    "recipient_id": "M" + chunk["merchant_name"],
-                    "recipient_category": state.where(state != "", "online"),
-                    "channel": chunk["use_chip"].map(_channel),
-                    "is_anomaly": chunk["is_fraud"].str.strip().str.lower().eq("yes"),
-                }
-            )
-        )
+    for rows, dropped in iter_ibm(path, user_fraction, from_year, seed, chunksize):
+        dropped_refunds += dropped
+        if not rows.empty:
+            parts.append(rows)
     if not parts:
         raise ValueError("После фильтрации не осталось транзакций: увеличьте долю пользователей или период")
     df = pd.concat(parts, ignore_index=True).sort_values(["timestamp", "client_id"], kind="stable").reset_index(drop=True)
-    df["anomaly_type"] = df["is_anomaly"].map({True: "fraud", False: ""})
     df.insert(0, "transaction_id", [f"IBM{seed}-{i:09d}" for i in range(len(df))])
     df.attrs["dropped_refunds"] = dropped_refunds
     return df[COLUMNS]

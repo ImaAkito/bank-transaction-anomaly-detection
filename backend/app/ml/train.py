@@ -10,10 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import IsolationForest
 
 from app.domain.features import DEFAULT_FEATURE_NAMES, select_features
 from app.ml.dataset import build_feature_frame, fit_population_on_train, time_split
+from app.ml.drift import build_reference
 from app.ml.gbm import hybrid_matrix, select_and_fit_lgbm
 from app.ml.metrics import budget_metrics, evaluate
 from app.ml.model import ModelBundle, save_bundle, sigmoid_calibration
@@ -50,6 +52,16 @@ def tune_isolation_forest(train, val, seed: int) -> tuple[dict, list[dict]]:
     return best["params"], results
 
 
+def attach_reference(bundle: ModelBundle, frame) -> ModelBundle:
+    """Опорные распределения признаков и доля оповещений на обучающих данных — для мониторинга дрейфа."""
+    bundle.reference = build_reference(
+        {name: frame[name].values for name in bundle.feature_names},
+        bundle.score(frame[bundle.feature_names].values),
+        bundle.thresholds["medium"],
+    )
+    return bundle
+
+
 def train_isolation_forest(train, val, test, seed: int, tune: bool) -> ModelBundle:
     params = {"n_estimators": 200, "max_samples": 512, "max_features": 0.6}
     search = []
@@ -71,7 +83,7 @@ def train_isolation_forest(train, val, test, seed: int, tune: bool) -> ModelBund
     metrics = evaluate(test["is_anomaly"].values, scores, bundle.thresholds["medium"])
     bundle.params = params
     bundle.metrics = {"test": metrics, "search": search, "train_rows": len(fit_frame), "test_rows": len(test)}
-    return bundle
+    return attach_reference(bundle, fit_frame)
 
 
 MONOTONE = False  # --monotone: монотонные ограничения бустинга
@@ -99,6 +111,10 @@ def _finish_supervised(bundle: ModelBundle, X_val: np.ndarray, test, train_rows:
     return bundle
 
 
+def _with_reference(bundle: ModelBundle, train) -> ModelBundle:
+    return attach_reference(bundle, train)
+
+
 def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
     """LightGBM: глубина и число деревьев по хронологическим окнам, пороги по бюджету оповещений."""
     model, report = select_and_fit_lgbm(
@@ -107,7 +123,7 @@ def train_lightgbm(train, val, test, seed: int) -> ModelBundle:
     )
     bundle = ModelBundle(kind="lightgbm", model=model, feature_names=list(FEATURES), calibration={"type": "probability"})
     bundle.params = {"max_depth": report["depth"], "n_estimators": report["n_estimators"]}
-    return _finish_supervised(bundle, val[FEATURES].values, test, len(train), report)
+    return _with_reference(_finish_supervised(bundle, val[FEATURES].values, test, len(train), report), train)
 
 
 def train_hybrid(train, val, test, seed: int, tune: bool) -> ModelBundle:
@@ -126,7 +142,7 @@ def train_hybrid(train, val, test, seed: int, tune: bool) -> ModelBundle:
         calibration={"type": "probability"},
     )
     bundle.params = {"forest": params, "max_depth": report["depth"], "n_estimators": report["n_estimators"]}
-    return _finish_supervised(bundle, val[FEATURES].values, test, len(train), report)
+    return _with_reference(_finish_supervised(bundle, val[FEATURES].values, test, len(train), report), train)
 
 
 def main() -> None:

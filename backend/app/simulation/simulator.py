@@ -6,6 +6,7 @@
 Запуск: python -m app.simulation.simulator --api http://localhost:8000 --rate 5
 """
 import argparse
+import os
 import logging
 import sys
 import time
@@ -33,7 +34,7 @@ def wait_for_api(client: httpx.Client, api: str, timeout: float = 120.0) -> None
     raise SystemExit("API недоступен")
 
 
-def payload_from_row(row: dict) -> dict:
+def payload_from_row(row: dict, timezone: str | None = None) -> dict:
     ts = pd.Timestamp(row["timestamp"]).to_pydatetime()
     return {
         "transaction_id": row["transaction_id"],
@@ -47,6 +48,7 @@ def payload_from_row(row: dict) -> dict:
         "recipient_category": row["recipient_category"],
         "simulation_label": bool(row["is_anomaly"]),
         "simulation_anomaly_type": row["anomaly_type"] or None,
+        **({"timezone": timezone} if timezone else {}),
     }
 
 
@@ -61,13 +63,17 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=5.0, help="транзакций в секунду в живом режиме")
     parser.add_argument("--anomaly-rate", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=2024)
+    parser.add_argument("--api-key", default=os.environ.get("INGEST_API_KEY"),
+                        help="ключ приёма транзакций (X-API-Key), нужен при включённой аутентификации")
+    parser.add_argument("--timezone", default=None, help="часовой пояс клиентов (IANA), например Europe/Moscow")
     parser.add_argument("--loop", action="store_true", help="после завершения начать заново с новым seed")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", stream=sys.stdout)
 
     endpoint = "/api/transactions/enqueue" if args.mode == "enqueue" else "/api/transactions"
     seed = args.seed
-    with httpx.Client(timeout=30) as client:
+    headers = {"X-API-Key": args.api_key} if args.api_key else {}
+    with httpx.Client(timeout=30, headers=headers) as client:
         wait_for_api(client, args.api)
         while True:
             total_days = args.history_days + args.live_days
@@ -91,7 +97,7 @@ def main() -> None:
 
             failed = 0
             for i, row in enumerate(history.to_dict("records"), 1):
-                response = client.post(f"{args.api}{endpoint}", json=payload_from_row(row))
+                response = client.post(f"{args.api}{endpoint}", json=payload_from_row(row, args.timezone))
                 failed += response.status_code >= 400
                 if i % 1000 == 0:
                     log.info("История: отправлено %s/%s", i, len(history))
@@ -100,7 +106,7 @@ def main() -> None:
             interval = 1.0 / args.rate if args.rate > 0 else 0.0
             for i, row in enumerate(live.to_dict("records"), 1):
                 started = time.monotonic()
-                response = client.post(f"{args.api}{endpoint}", json=payload_from_row(row))
+                response = client.post(f"{args.api}{endpoint}", json=payload_from_row(row, args.timezone))
                 if response.status_code >= 400:
                     log.warning("Ошибка %s: %s", response.status_code, response.text[:200])
                 if i % 200 == 0:

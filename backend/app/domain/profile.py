@@ -77,11 +77,12 @@ def update_behavior(profile: dict[str, Any], tx: Tx) -> None:
     stats[1] += cat_delta / stats[0]
     stats[2] += cat_delta * (x - stats[1])
 
-    angle = 2 * math.pi * tx.ts.hour / 24
+    local = tx.local
+    angle = 2 * math.pi * local.hour / 24
     profile["hour_sin_sum"] = profile.get("hour_sin_sum", 0.0) + math.sin(angle)
     profile["hour_cos_sum"] = profile.get("hour_cos_sum", 0.0) + math.cos(angle)
-    profile["hour_counts"][tx.ts.hour] += 1
-    profile["weekday_counts"][tx.ts.weekday()] += 1
+    profile["hour_counts"][local.hour] += 1
+    profile["weekday_counts"][local.weekday()] += 1
     _inc(profile["categories"], tx.category)
     _inc(profile["channels"], tx.channel)
     _inc(profile["currencies"], tx.currency)

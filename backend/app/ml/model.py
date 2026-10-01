@@ -1,5 +1,6 @@
 """Артефакт модели: обученная модель, калибровка оценки в диапазон [0, 1], пороги риска."""
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ class ModelBundle:
     params: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
     population: dict[str, Any] = field(default_factory=dict)
+    reference: dict[str, Any] = field(default_factory=dict)  # опорные распределения для мониторинга дрейфа
     _explainer: Any = field(default=None, repr=False, compare=False)
 
     @property
@@ -107,14 +109,21 @@ def sigmoid_calibration(train_raw: np.ndarray, q_center: float = 0.98, q_high: f
 
 
 def save_bundle(bundle: ModelBundle, path: str | Path) -> None:
+    """Атомарная запись: сначала во временный файл, затем замена. Работающие сервисы не прочитают недописанный файл."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     bundle._explainer = None
-    joblib.dump(bundle, path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    joblib.dump(bundle, tmp)
+    os.replace(tmp, path)
 
 
 def load_bundle(path: str | Path) -> ModelBundle:
     bundle = joblib.load(path)
     if not isinstance(bundle, ModelBundle):
         raise TypeError("Файл не содержит артефакт модели")
+    # Совместимость с артефактами, сохранёнными до появления новых полей.
+    for name, default in (("population", {}), ("reference", {})):
+        if not hasattr(bundle, name):
+            setattr(bundle, name, default)
     return bundle

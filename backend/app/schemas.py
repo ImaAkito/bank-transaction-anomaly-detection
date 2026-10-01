@@ -20,6 +20,7 @@ class TransactionIn(BaseModel):
     recipient_id: str | None = Field(default=None, max_length=128)
     recipient_category: str | None = Field(default=None, max_length=64)
     extra: dict[str, Any] = Field(default_factory=dict)
+    timezone: str | None = Field(default=None, max_length=64, description="Часовой пояс клиента (IANA), например Europe/Moscow")
     # Только для демонстрации: истинная метка симулятора. В модель не передаётся.
     simulation_label: bool | None = None
     simulation_anomaly_type: str | None = Field(default=None, max_length=64)
@@ -72,6 +73,8 @@ class TransactionOut(BaseModel):
     recipient_id: str | None
     recipient_category: str | None
     extra: dict[str, Any] | None
+    timezone: str
+    local_time: datetime
     simulation_label: bool | None
     simulation_anomaly_type: str | None
     received_at: datetime
@@ -93,7 +96,7 @@ class QueuedOut(BaseModel):
 
 class ReviewIn(BaseModel):
     status: ReviewStatus
-    reviewer: str = Field(default="analyst", max_length=128)
+    reviewer: str | None = Field(default=None, max_length=128, description="Игнорируется при включённой аутентификации")
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -107,6 +110,7 @@ class ClientRow(BaseModel):
 
 class ClientDetail(BaseModel):
     client_id: str
+    timezone: str
     first_seen: datetime
     last_seen: datetime
     profile: dict[str, Any]
@@ -124,3 +128,32 @@ class AlertHistoryOut(BaseModel):
     actor: str | None
     comment: str | None
     created_at: datetime
+
+
+Role = Literal["viewer", "analyst", "admin"]
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+    role: Role
+    expires_at: datetime
+
+
+class UserOut(BaseModel):
+    username: str
+    role: Role
+    active: bool
+    created_at: datetime
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=6, max_length=128)
+    role: Role = "analyst"

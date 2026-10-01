@@ -1,6 +1,8 @@
 """Ядро обработки: приём → предобработка → признаки → профиль → оценка → интерпретация → сохранение."""
 import copy
+import dataclasses
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -12,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.domain.features import compute_features, should_hold, to_vector
-from app.domain.preprocessing import Tx, normalize
+from app.domain.preprocessing import Tx, normalize, zone
 from app.domain.profile import new_profile, update_activity, update_behavior
 from app.ml.explain import build_reasons, shap_factors, summarize
 from app.ml.model import ModelBundle, load_bundle
@@ -36,16 +38,22 @@ class TransactionNotFoundError(LookupError):
 
 
 class ModelStore:
-    """Хранит загруженную модель; позволяет перезагрузить артефакт без перезапуска сервиса."""
+    """Хранит загруженную модель и перечитывает артефакт, если файл изменился (после переобучения)."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, check_seconds: float = 10.0) -> None:
         self.path = path
+        self.check_seconds = check_seconds
         self._bundle: ModelBundle | None = None
+        self._mtime: float | None = None
+        self._last_check = 0.0
         self._lock = threading.Lock()
 
     def load(self) -> ModelBundle:
         with self._lock:
+            mtime = os.path.getmtime(self.path)
             self._bundle = load_bundle(self.path)
+            self._mtime = mtime
+            self._last_check = time.monotonic()
             log.info("Модель загружена: %s (%s)", self._bundle.version, self.path)
             return self._bundle
 
@@ -57,7 +65,21 @@ class ModelStore:
             log.exception("Не удалось загрузить модель из %s", self.path)
             return False
 
+    def _maybe_reload(self) -> None:
+        now = time.monotonic()
+        if now - self._last_check < self.check_seconds:
+            return
+        self._last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if self._mtime is None or mtime != self._mtime:
+            log.info("Файл модели изменился, перезагрузка")
+            self.try_load()
+
     def get(self) -> ModelBundle:
+        self._maybe_reload()
         if self._bundle is None:
             raise ModelNotLoadedError("Модель не загружена")
         return self._bundle
@@ -88,6 +110,7 @@ def _tx_from_row(row: Transaction, rates: dict[str, float]) -> Tx:
             "recipient_id": row.recipient_id,
             "recipient_category": row.recipient_category,
             "extra": row.extra,
+            "timezone": row.timezone,
         },
         rates,
     )
@@ -106,6 +129,8 @@ def serialize(tx: Transaction, analysis: Analysis) -> dict[str, Any]:
         "recipient_id": tx.recipient_id,
         "recipient_category": tx.recipient_category,
         "extra": tx.extra,
+        "timezone": tx.timezone,
+        "local_time": tx.timestamp.astimezone(zone(tx.timezone or "UTC")),
         "simulation_label": tx.simulation_label,
         "simulation_anomaly_type": tx.simulation_anomaly_type,
         "received_at": tx.received_at,
@@ -145,7 +170,7 @@ class AnalysisService:
         started = time.perf_counter()
         bundle = self.model_store.get()
         try:
-            tx = normalize(payload.model_dump(), self.settings.currency_rates)
+            tx = normalize(payload.model_dump(), self.settings.currency_rates, self.settings.default_timezone)
         except Exception:
             metrics.TX_ERRORS.labels(stage="preprocessing").inc()
             raise
@@ -185,11 +210,11 @@ class AnalysisService:
             return None
         return tx_row, tx_row.analysis
 
-    def _get_or_create_client(self, db: Session, client_id: str, ts: datetime) -> Client:
+    def _get_or_create_client(self, db: Session, client_id: str, ts: datetime, timezone_name: str = "UTC") -> Client:
         client = db.scalar(select(Client).where(Client.id == client_id).with_for_update())
         if client is not None:
             return client
-        client = Client(id=client_id, profile=new_profile(), first_seen=ts, last_seen=ts)
+        client = Client(id=client_id, profile=new_profile(), first_seen=ts, last_seen=ts, timezone=timezone_name)
         db.add(client)
         try:
             db.flush()
@@ -204,7 +229,12 @@ class AnalysisService:
         self, db: Session, bundle: ModelBundle, tx: Tx, payload: TransactionIn, started: float
     ) -> dict[str, Any]:
         settings = self.settings
-        client = self._get_or_create_client(db, tx.client_id, tx.ts)
+        client = self._get_or_create_client(db, tx.client_id, tx.ts, tx.timezone)
+        # Часовой пояс: явно переданный обновляет пояс клиента, иначе используется сохранённый пояс клиента.
+        if payload.timezone:
+            client.timezone = tx.timezone
+        elif client.timezone and client.timezone != tx.timezone:
+            tx = dataclasses.replace(tx, timezone=client.timezone)
         profile = copy.deepcopy(client.profile)
 
         features, ctx = compute_features(profile, tx, settings.min_history_for_profile, getattr(bundle, "population", None))
@@ -239,6 +269,7 @@ class AnalysisService:
             recipient_category=tx.recipient_category,
             channel=tx.channel,
             extra=tx.extra or None,
+            timezone=tx.timezone,
             simulation_label=payload.simulation_label,
             simulation_anomaly_type=payload.simulation_anomaly_type,
         )

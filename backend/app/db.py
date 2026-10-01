@@ -75,10 +75,30 @@ def session_factory() -> sessionmaker[Session]:
     return _session_factory
 
 
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def run_migrations(url: str | None = None) -> None:
+    """Применяет миграции Alembic до последней версии."""
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", (url or get_settings().database_url).replace("%", "%%"))
+    command.upgrade(config, "head")
+
+
 def init_db() -> None:
     from app import models  # noqa: F401  (регистрация таблиц)
 
-    Base.metadata.create_all(get_engine())
+    if get_settings().db_migrate:
+        url = get_settings().database_url
+        if url.startswith("sqlite") and ":memory:" not in url:
+            Path(url.split("///", 1)[-1]).parent.mkdir(parents=True, exist_ok=True)
+        run_migrations(url)
+    else:
+        Base.metadata.create_all(get_engine())
 
 
 def get_db() -> Iterator[Session]:

@@ -44,6 +44,9 @@ def build_queue(settings: Settings, service: AnalysisService, redis_client=None)
             settings.queue_name,
             settings.queue_processing_name,
             settings.queue_failed_name,
+            partitions=settings.queue_partitions,
+            worker_index=settings.worker_index,
+            worker_count=settings.worker_count,
         )
     return MemoryQueue(make_handler(service))
 

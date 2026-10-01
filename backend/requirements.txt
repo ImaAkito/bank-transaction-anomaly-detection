@@ -15,3 +15,6 @@ redis==8.1.0
 httpx==0.28.1
 prometheus-client==0.26.0
 matplotlib==3.11.2
+alembic==1.20.0
+tzdata==2026.4
+catboost==1.2.10
