@@ -193,7 +193,8 @@ def test_drift_endpoint_and_retraining(client, monkeypatch):
 
     rows = _feed(client)
     drift = client.get("/api/model/drift").json()
-    assert drift["available"] is True and drift["window"] == rows and drift["features"]
+    assert drift["available"] is True and 0 < drift["window"] < rows and drift["features"]
+    assert drift["min_history"] == 20  # новые клиенты не участвуют в сравнении
 
     settings = get_settings().model_copy(update={"retrain_min_transactions": 100})
     before = load_bundle(settings.model_path).version
@@ -250,3 +251,18 @@ def test_large_pipeline_keeps_full_test_and_all_frauds(tmp_path):
     assert sampled["is_anomaly"].sum() == full["is_anomaly"].sum()  # все мошеннические операции сохранены
     assert len(train_s) + len(val_s) < 0.5 * (len(full) - len(test_full))
     assert str(sampled["log_amount"].dtype) == "float32"
+
+
+def test_drift_ignores_young_clients():
+    from app.ml.drift import build_reference, compute_drift
+
+    rng = np.random.default_rng(1)
+    mature = np.log1p(rng.integers(20, 200, 3000))
+    reference = build_reference({"log_history_len": mature, "x": rng.normal(0, 1, 3000)}, rng.random(3000), 0.99)
+    # запуск системы: почти все клиенты новые, их операции в сравнение не попадают
+    young = [{"log_history_len": float(np.log1p(k % 10)), "x": float(v)} for k, v in enumerate(rng.normal(5, 1, 900))]
+    old = [{"log_history_len": float(np.log1p(50)), "x": float(v)} for v in rng.normal(0, 1, 300)]
+    report = compute_drift(reference, young + old, list(rng.random(1200)), 0.99)
+    assert report["window"] == 300 and report["status"] == "ok"
+    only_young = compute_drift(reference, young, list(rng.random(900)), 0.99)
+    assert only_young["available"] is False

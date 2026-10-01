@@ -1,13 +1,16 @@
+# libgomp (OpenMP) нужен LightGBM. Берём его из полного образа той же версии Python/Debian, а не через apt:
+# сборка не зависит от доступа к репозиториям Debian, финальный образ остаётся slim.
+FROM python:3.11 AS runtime-libs
+RUN mkdir -p /out && cp /usr/lib/*-linux-gnu/libgomp.so.1 /out/
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# libgomp нужен LightGBM/XGBoost и scikit-learn (OpenMP)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=runtime-libs /out/libgomp.so.1 /usr/local/lib/libgomp.so.1
+RUN ldconfig
 
 WORKDIR /app
 COPY requirements.txt .

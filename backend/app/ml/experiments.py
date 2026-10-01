@@ -511,7 +511,8 @@ def main() -> None:
     parser.add_argument("--ibm-full", action="store_true",
                         help="полный объём IBM: потоковая обработка по партициям клиентов (см. app/ml/large.py)")
     parser.add_argument("--workers", type=int, default=None, help="процессов для расчёта признаков (--ibm-full)")
-    parser.add_argument("--parts", type=int, default=32, help="партиций клиентов (--ibm-full)")
+    parser.add_argument("--parts", type=int, default=None,
+                        help="партиций клиентов (--ibm-full); по умолчанию — по размеру файла, ~150 тыс. строк на партицию")
     parser.add_argument("--negative-rate", type=float, default=0.2,
                         help="доля обычных операций в обучении и валидации (--ibm-full); тест полный")
     parser.add_argument("--workdir", default="datasets/_partitions", help="временный каталог партиций (--ibm-full)")
