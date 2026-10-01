@@ -16,6 +16,7 @@ class Client(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     profile: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
     first_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
@@ -35,6 +36,7 @@ class Transaction(Base):
     recipient_category: Mapped[str | None] = mapped_column(String(64))
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
     extra: Mapped[dict | None] = mapped_column(JSONType)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
     # Метки симулятора: используются только для демонстрации и оценки качества, в модель не попадают.
     simulation_label: Mapped[bool | None] = mapped_column(Boolean)
     simulation_anomaly_type: Mapped[str | None] = mapped_column(String(64))
@@ -90,3 +92,28 @@ class AlertHistory(Base):
 
 
 Index("ix_transactions_client_ts", Transaction.client_id, Transaction.timestamp)
+
+
+class User(Base):
+    """Специалист. Роли: viewer — просмотр, analyst — просмотр и решения, admin — всё, включая модель и пользователей."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="analyst")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class ModelEvent(Base):
+    """Журнал модели: переобучения, перезагрузки, проверки дрейфа."""
+
+    __tablename__ = "model_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_version: Mapped[str | None] = mapped_column(String(64))
+    details: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)

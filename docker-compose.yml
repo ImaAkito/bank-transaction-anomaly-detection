@@ -1,13 +1,28 @@
 # Запуск всего комплекса: docker compose up --build
-# Интерфейс: http://localhost:8080   API и Swagger: http://localhost:8000/docs
+# Интерфейс: http://localhost:8080 (вход: admin / admin, задаётся ADMIN_USERNAME / ADMIN_PASSWORD)
+# API и Swagger: http://localhost:8000/docs
 name: anomaly-detection
 
 x-backend-env: &backend-env
   DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-anomaly}:${POSTGRES_PASSWORD:-anomaly}@postgres:5432/${POSTGRES_DB:-anomaly}
   QUEUE_BACKEND: redis
   REDIS_URL: redis://redis:6379/0
+  QUEUE_PARTITIONS: ${QUEUE_PARTITIONS:-4}
+  WORKER_COUNT: 2
   MODEL_PATH: /models/model.joblib
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  AUTH_ENABLED: ${AUTH_ENABLED:-true}
+  AUTH_SECRET: ${AUTH_SECRET:-change-me-in-production}
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+  INGEST_API_KEY: ${INGEST_API_KEY:-demo-ingest-key}
+  DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
+
+x-backend: &backend
+  build: ./backend
+  image: anomaly-detection-backend
+  volumes:
+    - models:/models
 
 services:
   postgres:
@@ -37,41 +52,59 @@ services:
 
   # Разовая задача: обучает модель и сохраняет артефакт в общий том, если его ещё нет.
   trainer:
-    build: ./backend
+    <<: *backend
     command: >
       sh -c "test -f /models/model.joblib
       && echo 'Модель уже обучена, пропуск'
       || python -m app.ml.train --out /models/model.joblib"
-    volumes:
-      - models:/models
     restart: "no"
 
+  # API применяет миграции Alembic при старте и создаёт первого администратора.
   api:
-    build: ./backend
+    <<: *backend
     environment:
       <<: *backend-env
     ports:
       - "8000:8000"
-    volumes:
-      - models:/models
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       trainer: {condition: service_completed_successfully}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 15s
+      start_period: 20s
 
-  worker:
-    build: ./backend
+  # Два воркера: партиции очереди распределены между ними, операции одного клиента идут строго по порядку.
+  worker-0:
+    <<: *backend
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *backend-env
-    volumes:
-      - models:/models
+      WORKER_INDEX: 0
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  worker-1:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *backend-env
+      WORKER_INDEX: 1
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  # Автоматическое переобучение: по расписанию (RETRAIN_INTERVAL_HOURS) или при значительном дрейфе.
+  retrainer:
+    <<: *backend
+    command: ["python", "-m", "app.ml.retrain", "--loop", "--check-minutes", "${RETRAIN_CHECK_MINUTES:-30}"]
+    environment:
+      <<: *backend-env
+      RETRAIN_INTERVAL_HOURS: ${RETRAIN_INTERVAL_HOURS:-24}
     depends_on:
       api: {condition: service_healthy}
     restart: unless-stopped
@@ -83,15 +116,18 @@ services:
     depends_on:
       - api
 
-  # Демонстрационный источник транзакций (имитирует банковскую систему).
+  # Демонстрационный источник транзакций (имитирует банковскую систему), передаёт ключ приёма X-API-Key.
   simulator:
-    build: ./backend
+    <<: *backend
     command: >
       python -m app.simulation.simulator --api http://api:8000 --mode enqueue
       --clients ${SIM_CLIENTS:-40} --rate ${SIM_RATE:-4} --loop
+    environment:
+      INGEST_API_KEY: ${INGEST_API_KEY:-demo-ingest-key}
     depends_on:
       api: {condition: service_healthy}
-      worker: {condition: service_started}
+      worker-0: {condition: service_started}
+      worker-1: {condition: service_started}
     restart: unless-stopped
 
 volumes:

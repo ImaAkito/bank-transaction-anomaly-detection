@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class PreprocessingError(ValueError):
@@ -22,10 +23,37 @@ class Tx:
     recipient_id: str | None = None
     recipient_category: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    timezone: str = "UTC"
 
     @property
     def epoch(self) -> float:
         return self.ts.timestamp()
+
+    @property
+    def local(self) -> datetime:
+        """Время операции в часовом поясе клиента: по нему считаются признаки времени суток и дня недели."""
+        return self.ts.astimezone(zone(self.timezone))
+
+
+_ZONES: dict[str, ZoneInfo] = {}
+
+
+def zone(name: str) -> ZoneInfo:
+    if name not in _ZONES:
+        _ZONES[name] = ZoneInfo(name)
+    return _ZONES[name]
+
+
+def valid_timezone(name: str | None) -> str | None:
+    """Возвращает имя часового пояса IANA или None, если строка пуста; некорректное имя — ошибка."""
+    name = _clean(name)
+    if name is None:
+        return None
+    try:
+        zone(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise PreprocessingError(f"Неизвестный часовой пояс: {name}") from exc
+    return name
 
 
 def _clean(value: Any) -> str | None:
@@ -35,11 +63,12 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
-def normalize(raw: dict[str, Any], rates: dict[str, float]) -> Tx:
+def normalize(raw: dict[str, Any], rates: dict[str, float], default_timezone: str = "UTC") -> Tx:
     """Приводит сырую транзакцию к единому виду.
 
     Строки очищаются от пробелов, категория и канал приводятся к нижнему регистру, валюта к верхнему.
-    Время без часового пояса трактуется как UTC. Сумма пересчитывается в базовую валюту по таблице курсов.
+    Время без часового пояса трактуется как UTC. Часовой пояс клиента (поле timezone, IANA) берётся из
+    транзакции, иначе используется default_timezone (сохранённый пояс клиента или общий по умолчанию). Сумма пересчитывается в базовую валюту по таблице курсов.
     """
     transaction_id = _clean(raw.get("transaction_id"))
     client_id = _clean(raw.get("client_id"))
@@ -82,4 +111,5 @@ def normalize(raw: dict[str, Any], rates: dict[str, float]) -> Tx:
         recipient_id=_clean(raw.get("recipient_id")),
         recipient_category=recipient_category.lower() if recipient_category else None,
         extra=dict(raw.get("extra") or {}),
+        timezone=valid_timezone(raw.get("timezone")) or valid_timezone(default_timezone) or "UTC",
     )

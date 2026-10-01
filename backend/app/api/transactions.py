@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_service
+from app.api.deps import can_ingest, can_read, can_review, get_service
+from app.security import Principal
 from app.db import get_db
 from app.domain.preprocessing import PreprocessingError
 from app.models import AlertHistory, Analysis, Transaction
@@ -37,6 +38,7 @@ SORT_COLUMNS = {
 def analyze_transaction(
     payload: TransactionIn,
     response: Response,
+    _: Principal = Depends(can_ingest),
     service: AnalysisService = Depends(get_service),
     db: Session = Depends(get_db),
 ):
@@ -56,7 +58,7 @@ def analyze_transaction(
 
 
 @router.post("/transactions/enqueue", response_model=QueuedOut, status_code=status.HTTP_202_ACCEPTED)
-def enqueue_transaction(payload: TransactionIn, request: Request):
+def enqueue_transaction(payload: TransactionIn, request: Request, _: Principal = Depends(can_ingest)):
     """Асинхронный приём: транзакция ставится в очередь, результат приходит по WebSocket и доступен в списке."""
     request.app.state.queue.enqueue(payload.model_dump(mode="json"))
     return QueuedOut(transaction_id=payload.transaction_id, queue_depth=request.app.state.queue.depth())
@@ -115,6 +117,7 @@ def list_transactions(
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    _: Principal = Depends(can_read),
     db: Session = Depends(get_db),
 ):
     conditions = _filtered_query(
@@ -137,7 +140,7 @@ def list_transactions(
 
 
 @router.get("/transactions/{transaction_id}", response_model=TransactionOut)
-def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
+def get_transaction(transaction_id: str, _: Principal = Depends(can_read), db: Session = Depends(get_db)):
     row = db.scalar(
         select(Transaction)
         .where(Transaction.transaction_id == transaction_id)
@@ -152,12 +155,16 @@ def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
 def review_transaction(
     transaction_id: str,
     body: ReviewIn,
+    request: Request,
+    principal: Principal = Depends(can_review),
     service: AnalysisService = Depends(get_service),
     db: Session = Depends(get_db),
 ):
     """Решение специалиста. Оценка модели остаётся аналитической и не означает установленного мошенничества."""
     try:
-        return service.review(db, transaction_id, body.status, body.reviewer, body.comment)
+        # При включённой аутентификации автор решения — вошедший пользователь, а не значение из запроса.
+        reviewer = principal.username if request.app.state.settings.auth_enabled else (body.reviewer or "analyst")
+        return service.review(db, transaction_id, body.status, reviewer, body.comment)
     except TransactionNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Транзакция не найдена") from exc
 
@@ -166,6 +173,7 @@ def review_transaction(
 def alert_history(
     client_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
+    _: Principal = Depends(can_read),
     db: Session = Depends(get_db),
 ):
     query = select(AlertHistory).order_by(AlertHistory.id.desc()).limit(limit)

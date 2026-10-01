@@ -3,7 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.deps import can_read
 from app.db import get_db
+from app.security import Principal
 from app.domain.profile import summarize
 from app.models import Analysis, Client, Transaction
 from app.schemas import ClientDetail, ClientRow
@@ -18,6 +20,7 @@ def list_clients(
     only_flagged: bool = False,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    _: Principal = Depends(can_read),
     db: Session = Depends(get_db),
 ):
     flagged = func.sum(case((Analysis.risk_level != "low", 1), else_=0))
@@ -50,7 +53,12 @@ def list_clients(
 
 
 @router.get("/{client_id}", response_model=ClientDetail)
-def client_detail(client_id: str, limit: int = Query(default=200, ge=1, le=1000), db: Session = Depends(get_db)):
+def client_detail(
+    client_id: str,
+    limit: int = Query(default=200, ge=1, le=1000),
+    _: Principal = Depends(can_read),
+    db: Session = Depends(get_db),
+):
     client = db.get(Client, client_id)
     if client is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Клиент не найден")
@@ -63,6 +71,7 @@ def client_detail(client_id: str, limit: int = Query(default=200, ge=1, le=1000)
     ).all()
     return {
         "client_id": client.id,
+        "timezone": client.timezone or "UTC",
         "first_seen": client.first_seen,
         "last_seen": client.last_seen,
         "profile": summarize(client.profile),

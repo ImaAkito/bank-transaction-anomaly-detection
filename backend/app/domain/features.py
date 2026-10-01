@@ -135,7 +135,8 @@ def compute_features(
     n = profile["n"]
     warm = n >= min_history
     maturity = n / (n + MATURITY_K) if MATURITY_K > 0 else 1.0
-    hour = tx.ts.hour
+    local = tx.local
+    hour = local.hour
     log_amount = math.log1p(tx.amount_base)
 
     median = _median(profile["amounts"])
@@ -155,7 +156,7 @@ def compute_features(
     hc = profile["hour_counts"]
     hour_count = hc[(hour - 1) % 24] + hc[hour] + hc[(hour + 1) % 24]
     hour_freq = _smoothed(hour_count, n, PRIORS["hour_freq"])
-    weekday_freq = _smoothed(profile["weekday_counts"][tx.ts.weekday()], n, PRIORS["weekday_freq"])
+    weekday_freq = _smoothed(profile["weekday_counts"][local.weekday()], n, PRIORS["weekday_freq"])
 
     # Сумма относительно привычной для КАТЕГОРИИ (общая медиана смешивает категории с разным масштабом сумм).
     cat_n, cat_mean, cat_m2 = profile.get("cat_stats", {}).get(tx.category, (0, 0.0, 0.0))
@@ -253,6 +254,7 @@ def compute_features(
         "log_history_len": math.log1p(n),
     }
     context = {
+        "timezone": tx.timezone,
         "warm": warm,
         "history_len": n,
         "median_amount": median if warm else None,

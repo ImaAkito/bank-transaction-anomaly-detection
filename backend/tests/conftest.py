@@ -8,6 +8,8 @@ _TMP = tempfile.mkdtemp(prefix="anomaly-tests-")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 os.environ["MODEL_PATH"] = f"{_TMP}/model.joblib"
 os.environ["QUEUE_BACKEND"] = "memory"
+os.environ["DB_MIGRATE"] = "false"
+os.environ["MODEL_RELOAD_CHECK_SECONDS"] = "0"
 os.environ["LOG_LEVEL"] = "WARNING"
 os.environ["LOG_JSON"] = "false"
 os.environ["EXPERIMENTS_SUMMARY_PATH"] = f"{_TMP}/no-summary.json"
@@ -51,3 +53,24 @@ def client(model_path):
     db.Base.metadata.drop_all(db.get_engine())
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def auth_client(model_path, monkeypatch):
+    """Приложение с включённой аутентификацией: администратор admin/admin-pass, ключ приёма ingest-key."""
+    from fastapi.testclient import TestClient
+
+    from app import db
+    from app.config import get_settings
+    from app.main import app
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-pass")
+    monkeypatch.setenv("INGEST_API_KEY", "ingest-key")
+    monkeypatch.setenv("AUTH_SECRET", "test-secret")
+    get_settings.cache_clear()
+    db.configure_engine(os.environ["DATABASE_URL"])
+    db.Base.metadata.drop_all(db.get_engine())
+    with TestClient(app) as test_client:
+        yield test_client
+    get_settings.cache_clear()

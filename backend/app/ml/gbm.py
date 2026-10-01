@@ -27,10 +27,41 @@ def time_folds(timestamps, n_chunks: int = 5, min_train_chunks: int = 2) -> list
     return folds
 
 
-def _lgbm(seed: int, depth: int, n_estimators: int, pos_weight: float):
+# Направление влияния признаков: +1 — большее значение может только повышать оценку, -1 — только понижать.
+# Запрещает деревьям запоминать конкретные значения (например, частоту определённого региона), которые
+# в другом периоде принадлежат другим регионам: остаётся только правило «реже / новее — подозрительнее».
+MONOTONE_DIRECTIONS: dict[str, int] = {
+    "pop_category_surprisal": 1,
+    "pop_region_surprisal": 1,
+    "pop_channel_surprisal": 1,
+    "novel_rare_category": 1,
+    "novel_rare_region": 1,
+    "is_new_recipient_category": 1,
+    "is_new_category": 1,
+    "is_new_channel": 1,
+    "is_new_recipient": 1,
+    "is_new_currency": 1,
+    "category_freq": -1,
+    "channel_freq": -1,
+    "recipient_cat_freq": -1,
+    "currency_freq": -1,
+    "hour_freq": -1,
+    "iforest_score": 1,
+}
+
+
+def monotone_constraints(names: list[str] | None) -> list[int] | None:
+    if not names:
+        return None
+    return [MONOTONE_DIRECTIONS.get(name, 0) for name in names]
+
+
+def _lgbm(seed: int, depth: int, n_estimators: int, pos_weight: float, constraints: list[int] | None = None):
     import lightgbm as lgb
 
+    extra = {"monotone_constraints": constraints, "monotone_constraints_method": "advanced"} if constraints else {}
     return lgb.LGBMClassifier(
+        **extra,
         n_estimators=n_estimators,
         learning_rate=0.05,
         max_depth=depth,
@@ -53,9 +84,13 @@ def positive_weight(y: np.ndarray) -> float:
     return float(max(((len(y) - pos) / pos) ** 0.5, 1.0))
 
 
-def select_and_fit_lgbm(X: np.ndarray, y: np.ndarray, timestamps, seed: int) -> tuple[Any, dict[str, Any]]:
+def select_and_fit_lgbm(
+    X: np.ndarray, y: np.ndarray, timestamps, seed: int, feature_names: list[str] | None = None,
+    monotone: bool = False,
+) -> tuple[Any, dict[str, Any]]:
     """Подбор глубины и числа деревьев по среднему PR-AUC на хронологических окнах, затем обучение на всех данных."""
     y = np.asarray(y).astype(int)
+    constraints = monotone_constraints(feature_names) if monotone else None
     folds = [
         (tr, va) for tr, va in time_folds(timestamps)
         if y[va].sum() >= MIN_POSITIVES_PER_FOLD and y[tr].sum() >= MIN_POSITIVES_PER_FOLD
@@ -66,7 +101,7 @@ def select_and_fit_lgbm(X: np.ndarray, y: np.ndarray, timestamps, seed: int) -> 
         for depth in DEPTH_GRID:
             scores = {n: [] for n in TREE_GRID}
             for tr, va in folds:
-                model = _lgbm(seed, depth, max(TREE_GRID), positive_weight(y[tr])).fit(X[tr], y[tr])
+                model = _lgbm(seed, depth, max(TREE_GRID), positive_weight(y[tr]), constraints).fit(X[tr], y[tr])
                 for n in TREE_GRID:
                     proba = model.predict_proba(X[va], num_iteration=n)[:, 1]
                     scores[n].append(average_precision_score(y[va], proba))
@@ -78,8 +113,8 @@ def select_and_fit_lgbm(X: np.ndarray, y: np.ndarray, timestamps, seed: int) -> 
     else:
         log.warning("Недостаточно положительных примеров для хронологической проверки, берутся параметры по умолчанию")
     _, depth, n_estimators = best
-    report.update({"depth": depth, "n_estimators": n_estimators, "cv_pr_auc": best[0] if folds else None})
-    model = _lgbm(seed, depth, n_estimators, positive_weight(y)).fit(X, y)
+    report.update({"monotone": bool(constraints), "depth": depth, "n_estimators": n_estimators, "cv_pr_auc": best[0] if folds else None})
+    model = _lgbm(seed, depth, n_estimators, positive_weight(y), constraints).fit(X, y)
     return model, report
 
 

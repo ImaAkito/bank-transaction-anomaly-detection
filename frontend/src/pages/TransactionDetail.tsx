@@ -7,6 +7,7 @@ import { TransactionTable } from "../components/TransactionTable";
 import { formatDate, formatMoney, formatNumber, TYPE_LABELS } from "../format";
 import { link } from "../router";
 import type { ClientDetail, Transaction } from "../types";
+import { canReview, useSession } from "../session";
 import { useLiveFeed } from "../useLiveFeed";
 
 export function TransactionDetail({ id }: { id: string }) {
@@ -14,7 +15,14 @@ export function TransactionDetail({ id }: { id: string }) {
   const [client, setClient] = useState<ClientDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [comment, setComment] = useState("");
-  const [reviewer, setReviewer] = useState(() => localStorage.getItem("reviewer") ?? "analyst");
+  const me = useSession();
+  const [reviewer, setReviewer] = useState(() => {
+    try {
+      return localStorage.getItem("reviewer") ?? "analyst";
+    } catch {
+      return "analyst";
+    }
+  });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -37,7 +45,11 @@ export function TransactionDetail({ id }: { id: string }) {
   const review = async (status: string) => {
     setBusy(true);
     try {
-      localStorage.setItem("reviewer", reviewer);
+      try {
+        localStorage.setItem("reviewer", reviewer);
+      } catch {
+        /* хранилище недоступно */
+      }
       const updated = await api.review(id, status, reviewer, comment);
       setTx(updated);
       setComment("");
@@ -129,6 +141,11 @@ export function TransactionDetail({ id }: { id: string }) {
               {tx.recipient_id ?? "—"}
               {tx.recipient_category && <span className="muted"> ({tx.recipient_category})</span>}
             </dd>
+            <dt>Местное время клиента</dt>
+            <dd>
+              {new Date(tx.local_time).toLocaleString("ru-RU", { timeZone: tx.timezone, dateStyle: "short", timeStyle: "medium" })}
+              <span className="muted"> ({tx.timezone})</span>
+            </dd>
             <dt>Получена системой</dt>
             <dd>{formatDate(tx.received_at)}</dd>
             <dt>Модель</dt>
@@ -158,8 +175,11 @@ export function TransactionDetail({ id }: { id: string }) {
             {a.review_comment && <> — «{a.review_comment}»</>}
           </div>
         )}
-        <div className="review-form">
-          <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Ваше имя" aria-label="Ваше имя" />
+        {!canReview(me) && <div className="muted">Решения по операциям принимают аналитики и администраторы.</div>}
+        <div className="review-form" hidden={!canReview(me)}>
+          {!me.auth_enabled && (
+            <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Ваше имя" aria-label="Ваше имя" />
+          )}
           <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий (необязательно)" aria-label="Комментарий" className="grow" />
           <button type="button" className="btn ok" disabled={busy} onClick={() => review("reviewed_normal")}>
             Операция нормальная

@@ -18,3 +18,4 @@ TX_LATENCY = Histogram(
 )
 QUEUE_DEPTH = Gauge("anomaly_queue_depth", "Длина очереди входящих транзакций", registry=REGISTRY)
 WS_CLIENTS = Gauge("anomaly_websocket_clients", "Подключения WebSocket", registry=REGISTRY)
+DRIFT_MAX_PSI = Gauge("anomaly_drift_max_psi", "Максимальный PSI признаков относительно обучения", registry=REGISTRY)

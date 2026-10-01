@@ -181,11 +181,40 @@ def fit_lgbm_time_cv(Xtr, ytr, timestamps, seed) -> Fitted:
                   time.perf_counter() - t0)
 
 
-def fit_hybrid(Xtr, ytr, timestamps, forest: Fitted, seed) -> Fitted:
+def fit_catboost(Xtr, ytr, Xva, yva, seed) -> Fitted | None:
+    """CatBoost (если установлен): ранняя остановка по валидации, вес класса — корень из отношения классов."""
+    try:
+        from catboost import CatBoostClassifier
+    except ImportError:
+        log.warning("CatBoost не установлен, метод пропущен")
+        return None
+    t0 = time.perf_counter()
+    pos = max(int(ytr.sum()), 1)
+    params = {"iterations": 500, "learning_rate": 0.05, "depth": 5, "l2_leaf_reg": 5.0,
+              "scale_pos_weight": float(max(((len(ytr) - pos) / pos) ** 0.5, 1.0))}
+    model = CatBoostClassifier(**params, random_seed=seed, verbose=False, thread_count=-1,
+                               eval_metric="PRAUC", od_type="Iter", od_wait=30)
+    model.fit(Xtr, ytr, eval_set=(Xva, yva), use_best_model=True)
+    params["best_iteration"] = int(model.get_best_iteration() or 0)
+    return Fitted("CatBoost", True, lambda X: model.predict_proba(X)[:, 1], params, time.perf_counter() - t0)
+
+
+def fit_monotone_lgbm(Xtr, ytr, timestamps, columns, seed) -> Fitted:
+    """LightGBM с монотонными ограничениями: редкость и новизна могут только повышать оценку."""
+    t0 = time.perf_counter()
+    model, report = select_and_fit_lgbm(Xtr, ytr, timestamps, seed, columns, monotone=True)
+    return Fitted("LightGBM монотонный", True, lambda X: model.predict_proba(X)[:, 1],
+                  {"depth": report["depth"], "n_estimators": report["n_estimators"], "cv_pr_auc": report["cv_pr_auc"]},
+                  time.perf_counter() - t0)
+
+
+def fit_hybrid(Xtr, ytr, timestamps, forest: Fitted, seed, columns=None, monotone: bool = False) -> Fitted:
     """Гибрид: оценка Isolation Forest (без меток) подаётся в LightGBM как дополнительный признак."""
     t0 = time.perf_counter()
-    model, report = select_and_fit_lgbm(hybrid_matrix(Xtr, forest.score(Xtr)), ytr, timestamps, seed)
-    return Fitted("Гибрид: LightGBM + Isolation Forest", True,
+    names = list(columns) + ["iforest_score"] if columns is not None else None
+    model, report = select_and_fit_lgbm(hybrid_matrix(Xtr, forest.score(Xtr)), ytr, timestamps, seed, names, monotone)
+    title = "Гибрид монотонный" if monotone else "Гибрид: LightGBM + Isolation Forest"
+    return Fitted(title, True,
                   lambda X: model.predict_proba(hybrid_matrix(X, forest.score(X)))[:, 1],
                   {"depth": report["depth"], "n_estimators": report["n_estimators"], "cv_pr_auc": report["cv_pr_auc"]},
                   time.perf_counter() - t0 + forest.fit_seconds)
@@ -219,16 +248,29 @@ def assess(fitted: Fitted, Xtr, Xva, yva, Xte, yte, test_types) -> dict:
     return result
 
 
+POPULATION_MODE = "fixed"  # --population-mode
+LARGE: dict | None = None  # --ibm-full: параметры потоковой обработки полного объёма
+
+
 def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dict | None) -> dict:
     log.info("=== seed %s: подготовка данных", seed)
-    df = source(seed)
-    frame = build_feature_frame(df, population=fit_population_on_train(df))
-    train, val, test = time_split(frame)
+    df = source(seed) if LARGE is None else pd.DataFrame()
+    if LARGE is not None:
+        from app.ml.large import build_large_frame, split_by_cutoffs
+
+        frame, large_info = build_large_frame(**LARGE, seed=seed)
+        train, val, test = split_by_cutoffs(frame, large_info)
+    else:
+        if POPULATION_MODE == "causal":
+            frame = build_feature_frame(df, population_mode="causal")
+        else:
+            frame = build_feature_frame(df, population=fit_population_on_train(df))
+        train, val, test = time_split(frame)
     ytr, yva, yte = (f["is_anomaly"].values.astype(int) for f in (train, val, test))
     test_types = test["anomaly_type"].values
     info = {
-        "rows": len(frame),
-        "anomaly_share": float(frame["is_anomaly"].mean()),
+        "rows": len(frame) if LARGE is None else large_info["rows"],
+        "anomaly_share": float(frame["is_anomaly"].mean()) if LARGE is None else large_info["frauds"] / max(large_info["rows"], 1),
         "train_rows": len(train), "val_rows": len(val), "test_rows": len(test),
         "test_anomalies": int(yte.sum()),
     }
@@ -263,8 +305,11 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
     run(fit_logreg(Xtr, ytr, seed))
     run(fit_xgboost(Xtr, ytr, Xva, yva, seed))
     run(fit_lightgbm(Xtr, ytr, Xva, yva, seed))
+    run(fit_catboost(Xtr, ytr, Xva, yva, seed))
     run(fit_lgbm_time_cv(Xtr, ytr, train["timestamp"].values, seed))
     run(fit_hybrid(Xtr, ytr, train["timestamp"].values, forest, seed))
+    run(fit_monotone_lgbm(Xtr, ytr, train["timestamp"].values, FEATURES, seed))
+    run(fit_hybrid(Xtr, ytr, train["timestamp"].values, forest, seed, FEATURES, monotone=True))
 
     # Влияние групп признаков: Isolation Forest с фиксированными параметрами.
     ablation: dict[str, dict] = {}
@@ -463,23 +508,44 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--ibm-full", action="store_true",
+                        help="полный объём IBM: потоковая обработка по партициям клиентов (см. app/ml/large.py)")
+    parser.add_argument("--workers", type=int, default=None, help="процессов для расчёта признаков (--ibm-full)")
+    parser.add_argument("--parts", type=int, default=32, help="партиций клиентов (--ibm-full)")
+    parser.add_argument("--negative-rate", type=float, default=0.2,
+                        help="доля обычных операций в обучении и валидации (--ibm-full); тест полный")
+    parser.add_argument("--workdir", default="datasets/_partitions", help="временный каталог партиций (--ibm-full)")
+    parser.add_argument("--population-mode", choices=["fixed", "causal"], default="fixed",
+                        help="fixed: частоты обучающего периода; causal: по операциям строго до текущей")
     parser.add_argument("--feature-groups", help="группы признаков через запятую: amount,time,velocity,novelty,history,population (по умолчанию все, кроме population)")
     parser.add_argument("--dataset", choices=["synthetic", "ibm"], default="synthetic")
     parser.add_argument("--ibm-path", help="CSV-файл IBM Credit Card Transactions")
-    parser.add_argument("--ibm-user-fraction", type=float, default=0.05)
+    parser.add_argument("--ibm-user-fraction", type=float, default=None,
+                        help="доля пользователей (по умолчанию 0,05; с --ibm-full — 1,0, весь объём)")
     parser.add_argument("--ibm-from-year", type=int, default=2010)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     FEATURES[:] = select_features(args.feature_groups)
+    global POPULATION_MODE
+    POPULATION_MODE = args.population_mode
     log.info("Признаков: %s (%s)", len(FEATURES), args.feature_groups or "все группы")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    if args.ibm_user_fraction is None:
+        args.ibm_user_fraction = 1.0 if args.ibm_full else 0.05
     if args.dataset == "ibm":
         if not args.ibm_path:
             parser.error("для --dataset ibm нужен --ibm-path")
+        if args.ibm_full:
+            global LARGE
+            LARGE = {"path": args.ibm_path, "workdir": args.workdir, "parts": args.parts, "workers": args.workers,
+                     "negative_rate": args.negative_rate, "user_fraction": args.ibm_user_fraction,
+                     "from_year": args.ibm_from_year}
+            if args.seeds == [42, 43, 44]:
+                args.seeds = [42]  # данные одни и те же; seed влияет только на модели
         from app.ml.ibm_loader import load_ibm
 
         # Разные seed дают разные выборки пользователей.
