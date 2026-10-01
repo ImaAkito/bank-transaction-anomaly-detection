@@ -6,6 +6,7 @@
 «labels» — вне профиля остаются истинные аномалии (только для сравнения), «none» — профиль обновляется всегда.
 Во всех случаях операция учитывается в признаках частоты (activity).
 """
+import numpy as np
 import pandas as pd
 
 from app.config import DEFAULT_CURRENCY_RATES
@@ -33,22 +34,35 @@ def build_feature_frame(
         running = {"n": 0, "categories": {}, "channels": {}, "recipient_categories": {}, "recipient_categories_n": 0}
         population = running
     profiles: dict[str, dict] = {}
-    records: list[dict] = []
     has_labels = "is_anomaly" in df.columns
+    ordered = df.sort_values("timestamp", kind="stable").reset_index(drop=True)
+    n = len(ordered)
+    # Признаки пишутся сразу в массив: список словарей на строку занимал бы в разы больше памяти.
+    values = np.empty((n, len(FEATURE_NAMES)), dtype=np.float64)
+    stamps = pd.to_datetime(ordered["timestamp"], utc=True)
+    labels = ordered["is_anomaly"].astype(bool).to_numpy() if has_labels else np.zeros(n, dtype=bool)
 
-    for row in df.sort_values("timestamp", kind="stable").to_dict("records"):
+    def column(name: str):
+        return ordered[name].tolist() if name in ordered.columns else [None] * n
+
+    cols = {name: column(name) for name in (
+        "transaction_id", "client_id", "amount", "currency", "category", "channel",
+        "recipient_id", "recipient_category", "timezone")}
+    py_stamps = stamps.dt.to_pydatetime() if hasattr(stamps.dt, "to_pydatetime") else list(stamps)
+
+    for i in range(n):
         tx = normalize(
             {
-                "transaction_id": row["transaction_id"],
-                "client_id": row["client_id"],
-                "timestamp": pd.Timestamp(row["timestamp"]).to_pydatetime(),
-                "amount": row["amount"],
-                "currency": row["currency"],
-                "category": row["category"],
-                "channel": row["channel"],
-                "recipient_id": row.get("recipient_id"),
-                "recipient_category": row.get("recipient_category"),
-                "timezone": row.get("timezone"),
+                "transaction_id": cols["transaction_id"][i],
+                "client_id": cols["client_id"][i],
+                "timestamp": py_stamps[i],
+                "amount": cols["amount"][i],
+                "currency": cols["currency"][i],
+                "category": cols["category"][i],
+                "channel": cols["channel"][i],
+                "recipient_id": cols["recipient_id"][i],
+                "recipient_category": cols["recipient_category"][i],
+                "timezone": cols["timezone"][i],
             },
             rates,
         )
@@ -62,29 +76,25 @@ def build_feature_frame(
                 running["recipient_categories_n"] += 1
                 rc = running["recipient_categories"]
                 rc[tx.recipient_category] = rc.get(tx.recipient_category, 0) + 1
-        is_anomaly = bool(row["is_anomaly"]) if has_labels else False
-        records.append(
-            {
-                "transaction_id": tx.transaction_id,
-                "client_id": tx.client_id,
-                "timestamp": tx.ts,
-                "is_anomaly": is_anomaly,
-                "anomaly_type": row.get("anomaly_type", "") if has_labels else "",
-                **features,
-            }
-        )
+        values[i] = [features[name] for name in FEATURE_NAMES]
         update_activity(profile, tx.epoch)
         if hold_policy == "rule":
             hold = should_hold(features)
         elif hold_policy == "labels":
-            hold = is_anomaly
+            hold = bool(labels[i])
         else:
             hold = False
         if not hold:
             update_behavior(profile, tx)
 
-    frame = pd.DataFrame.from_records(records, columns=META_COLUMNS + FEATURE_NAMES)
-    frame["is_anomaly"] = frame["is_anomaly"].astype(bool)
+    frame = pd.DataFrame(values, columns=FEATURE_NAMES)
+    frame.insert(0, "transaction_id", ordered["transaction_id"].astype(str).str.strip().to_numpy())
+    frame.insert(1, "client_id", ordered["client_id"].astype(str).str.strip().to_numpy())
+    frame.insert(2, "timestamp", stamps.to_numpy())
+    frame.insert(3, "is_anomaly", labels)
+    anomaly_type = ordered["anomaly_type"].fillna("").astype(str) if has_labels and "anomaly_type" in ordered else pd.Series("", index=ordered.index)
+    frame.insert(4, "anomaly_type", anomaly_type.to_numpy())
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     return frame
 
 

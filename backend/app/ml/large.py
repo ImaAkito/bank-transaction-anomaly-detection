@@ -99,12 +99,28 @@ def _features_for_part(args) -> pd.DataFrame:
         keep = frame["is_anomaly"].to_numpy() | ~before_test | _keep_hash(frame["transaction_id"], negative_rate)
         frame = frame[keep]
     frame[FEATURE_NAMES] = frame[FEATURE_NAMES].astype("float32")
-    return frame
+    # Экономия памяти итоговой таблицы: идентификатор операции не нужен, клиент — целое число,
+    # тип аномалии восстанавливается по метке.
+    frame = frame.drop(columns=["transaction_id"])
+    frame["client_id"] = frame["client_id"].str.lstrip("U").astype("int32")
+    frame["anomaly_type"] = pd.Categorical(frame["anomaly_type"], categories=["", "fraud"])
+    return frame.reset_index(drop=True)
 
 
-def build_large_frame(path: str | Path, workdir: str | Path, parts: int = 32, workers: int | None = None,
+ROWS_PER_PART = 150_000
+BYTES_PER_ROW = 100  # оценка для файла IBM (~2,3 ГБ на ~24 млн строк)
+
+
+def auto_parts(path: str | Path, user_fraction: float) -> int:
+    """Число партиций, при котором в одной партиции около ROWS_PER_PART строк (ограничивает память процесса)."""
+    rows = Path(path).stat().st_size / BYTES_PER_ROW * user_fraction
+    return int(min(512, max(8, np.ceil(rows / ROWS_PER_PART))))
+
+
+def build_large_frame(path: str | Path, workdir: str | Path, parts: int | None = None, workers: int | None = None,
                       negative_rate: float = 0.2, user_fraction: float = 1.0, from_year: int = 0,
                       seed: int = 42) -> tuple[pd.DataFrame, dict]:
+    parts = parts or auto_parts(path, user_fraction)
     info = partition_file(path, workdir, parts, user_fraction, from_year, seed)
     log.info("Строк: %s, мошеннических: %s; расчёт популяционных частот", info["rows"], info["frauds"])
     population = population_from_parts(workdir, info["train_cut"])
