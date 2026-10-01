@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # libgomp нужен LightGBM/XGBoost и scikit-learn (OpenMP)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,9 +14,13 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./
 COPY experiments ./experiments
 
-RUN useradd --create-home appuser && mkdir -p /app/models /app/data && chown -R appuser /app
+# /models — точка монтирования общего тома с моделью: каталог создаётся заранее с владельцем appuser,
+# чтобы том унаследовал права и сервисы обучения могли записывать артефакт.
+RUN useradd --create-home appuser && mkdir -p /app/models /app/data /models && chown -R appuser /app /models
 USER appuser
 
 EXPOSE 8000

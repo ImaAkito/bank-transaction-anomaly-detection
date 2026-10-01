@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getToken } from "./auth";
 import type { LiveEvent } from "./types";
 
 export type ConnectionState = "connecting" | "open" | "closed";
@@ -20,7 +21,9 @@ export function useLiveFeed(onEvent: (event: LiveEvent) => void): ConnectionStat
       if (disposed) return;
       setState("connecting");
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${scheme}://${window.location.host}/ws/transactions`);
+      const token = getToken();
+      const query = token ? `?token=${encodeURIComponent(token)}` : "";
+      socket = new WebSocket(`${scheme}://${window.location.host}/ws/transactions${query}`);
       socket.onopen = () => {
         attempt = 0;
         setState("open");

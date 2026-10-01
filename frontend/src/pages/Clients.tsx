@@ -88,7 +88,7 @@ export function ClientPage({ id }: { id: string }) {
         </div>
         <h2>Клиент {client.client_id}</h2>
         <div className="muted">
-          Первая операция в системе: {formatDate(client.first_seen)} · последняя активность: {formatDate(client.last_seen)}
+          Часовой пояс: {client.timezone} · первая операция в системе: {formatDate(client.first_seen)} · последняя активность: {formatDate(client.last_seen)}
         </div>
       </div>
 

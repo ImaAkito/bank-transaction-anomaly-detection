@@ -48,6 +48,8 @@ export interface Transaction {
   recipient_id: string | null;
   recipient_category: string | null;
   extra: Record<string, unknown> | null;
+  timezone: string;
+  local_time: string;
   simulation_label: boolean | null;
   simulation_anomaly_type: string | null;
   received_at: string;
@@ -89,6 +91,7 @@ export interface ClientProfile {
 
 export interface ClientDetail {
   client_id: string;
+  timezone: string;
   first_seen: string;
   last_seen: string;
   profile: ClientProfile;
@@ -134,6 +137,56 @@ export interface Aggregate {
   std: number;
 }
 
+export interface Me {
+  username: string;
+  role: "viewer" | "analyst" | "admin" | "service";
+  auth_enabled: boolean;
+}
+
+export interface UserRow {
+  username: string;
+  role: "viewer" | "analyst" | "admin";
+  active: boolean;
+  created_at: string;
+}
+
+export interface DriftReport {
+  available: boolean;
+  reason?: string;
+  status?: "ok" | "warning" | "alert";
+  window?: number;
+  max_psi?: number;
+  flagged_share?: number;
+  expected_flagged_share?: number;
+  features?: { feature: string; psi: number; level: "ok" | "warning" | "alert" }[];
+  thresholds?: { warning: number; alert: number };
+}
+
+export interface ModelEvent {
+  id: number;
+  event_type: string;
+  model_version: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ExperimentSummary {
+  seeds: number[];
+  tuned_isolation_forest_params: Record<string, unknown>;
+  models: Record<
+    string,
+    {
+      supervised: boolean;
+      roc_auc: Aggregate;
+      pr_auc: Aggregate;
+      val_threshold: Record<"precision" | "recall" | "f1", Aggregate>;
+      label_free_threshold?: Record<"precision" | "recall" | "f1", Aggregate>;
+      budget?: Record<string, Record<"precision" | "recall", Aggregate>>;
+    }
+  >;
+  ablation: Record<string, { n_features: number; roc_auc: Aggregate; pr_auc: Aggregate; f1: Aggregate }>;
+}
+
 export interface ModelInfo {
   model: {
     kind: string;
@@ -144,21 +197,8 @@ export interface ModelInfo {
     params: Record<string, unknown>;
     metrics: { test?: Record<string, number>; train_rows?: number; test_rows?: number };
   };
-  experiments: null | {
-    seeds: number[];
-    tuned_isolation_forest_params: Record<string, unknown>;
-    models: Record<
-      string,
-      {
-        supervised: boolean;
-        roc_auc: Aggregate;
-        pr_auc: Aggregate;
-        val_threshold: Record<"precision" | "recall" | "f1", Aggregate>;
-        label_free_threshold?: Record<"precision" | "recall" | "f1", Aggregate>;
-      }
-    >;
-    ablation: Record<string, { n_features: number; roc_auc: Aggregate; pr_auc: Aggregate; f1: Aggregate }>;
-  };
+  experiments: ExperimentSummary | null;
+  experiment_runs: { name: string; rows: number | null; anomaly_share: number | null; summary: ExperimentSummary }[];
 }
 
 export type LiveEvent = { type: "transaction_analyzed" | "transaction_reviewed"; data: Transaction };

@@ -1,15 +1,27 @@
+import { getToken, UnauthorizedError } from "./auth";
 import type {
   AlertHistoryRow,
   ClientDetail,
   ClientRow,
+  DriftReport,
+  Me,
+  ModelEvent,
   ModelInfo,
+  UserRow,
   Stats,
   Transaction,
   TransactionPage,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(path, { ...init, headers });
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("unauthorized"));
+    throw new UnauthorizedError("401: требуется вход");
+  }
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -54,6 +66,29 @@ export const api = {
     return request(`/api/transactions?${params}`);
   },
   transaction: (id: string) => request<Transaction>(`/api/transactions/${encodeURIComponent(id)}`),
+  me: () => request<Me>("/api/auth/me"),
+  login: (username: string, password: string) =>
+    request<{ access_token: string; username: string; role: string }>("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  users: () => request<UserRow[]>("/api/users"),
+  createUser: (username: string, password: string, role: string) =>
+    request<UserRow>("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role }),
+    }),
+  updateUser: (username: string, patch: { active?: boolean; role?: string }) => {
+    const params = new URLSearchParams();
+    if (patch.active !== undefined) params.set("active", String(patch.active));
+    if (patch.role) params.set("role", patch.role);
+    return request<UserRow>(`/api/users/${encodeURIComponent(username)}?${params}`, { method: "PATCH" });
+  },
+  drift: () => request<DriftReport>("/api/model/drift"),
+  modelEvents: () => request<ModelEvent[]>("/api/model/events?limit=20"),
+  retrain: () => request<{ status: string }>("/api/model/retrain", { method: "POST" }),
   review: (id: string, status: string, reviewer: string, comment: string) =>
     request<Transaction>(`/api/transactions/${encodeURIComponent(id)}/review`, {
       method: "PATCH",
