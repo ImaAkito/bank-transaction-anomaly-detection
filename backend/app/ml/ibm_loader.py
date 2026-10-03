@@ -14,7 +14,8 @@ Zip, MCC, Errors, Is Fraud.
 * recipient_category   ← штат мерчанта (online, если он не указан): новый штат служит сигналом географии;
 * is_anomaly           ← Is Fraud == Yes, anomaly_type = fraud.
 
-Файл читается частями; отбирается доля пользователей (детерминированно по seed) и период с from_year,
+Файл читается частями; отбирается доля пользователей (детерминированно по seed) и период с from_year
+(и, если задан, по to_year включительно),
 чтобы объём вычислений оставался разумным.
 """
 import re
@@ -88,14 +89,17 @@ def _select_users(users: pd.Series, fraction: float, seed: int) -> pd.Series:
     return ((users.astype("int64") * 2654435761 + seed * 40503) % 1000) < int(fraction * 1000)
 
 
-def normalize_chunk(chunk: pd.DataFrame, user_fraction: float, from_year: int, seed: int) -> tuple[pd.DataFrame, int]:
+def normalize_chunk(chunk: pd.DataFrame, user_fraction: float, from_year: int, seed: int,
+                    to_year: int | None = None) -> tuple[pd.DataFrame, int]:
     """Приводит часть файла IBM к формату проекта. Возвращает (строки, число отброшенных возвратов)."""
     chunk = _normalize_columns(chunk)
     required = {"user", "year", "month", "day", "time", "amount", "use_chip", "merchant_name", "mcc", "is_fraud"}
     missing = required - set(chunk.columns)
     if missing:
         raise ValueError(f"В файле нет колонок: {sorted(missing)}")
-    chunk = chunk[_select_users(chunk["user"], user_fraction, seed) & (chunk["year"].astype(int) >= from_year)]
+    year = chunk["year"].astype(int)
+    in_period = (year >= from_year) & (year <= to_year) if to_year is not None else year >= from_year
+    chunk = chunk[_select_users(chunk["user"], user_fraction, seed) & in_period]
     if chunk.empty:
         return pd.DataFrame(columns=[c for c in COLUMNS if c != "transaction_id"]), 0
     amount = pd.to_numeric(chunk["amount"].str.replace(r"[$,\s]", "", regex=True), errors="coerce")
@@ -126,18 +130,18 @@ def normalize_chunk(chunk: pd.DataFrame, user_fraction: float, from_year: int, s
 
 
 def iter_ibm(path: str | Path, user_fraction: float = 1.0, from_year: int = 0, seed: int = 42,
-             chunksize: int = 1_000_000):
+             chunksize: int = 1_000_000, to_year: int | None = None):
     """Потоковое чтение файла IBM частями (для полного объёма)."""
     for chunk in pd.read_csv(path, chunksize=chunksize, dtype=str, keep_default_na=False):
-        rows, dropped = normalize_chunk(chunk, user_fraction, from_year, seed)
+        rows, dropped = normalize_chunk(chunk, user_fraction, from_year, seed, to_year)
         yield rows, dropped
 
 
 def load_ibm(path: str | Path, user_fraction: float = 0.05, from_year: int = 2010, seed: int = 42,
-             chunksize: int = 1_000_000) -> pd.DataFrame:
+             chunksize: int = 1_000_000, to_year: int | None = None) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     dropped_refunds = 0
-    for rows, dropped in iter_ibm(path, user_fraction, from_year, seed, chunksize):
+    for rows, dropped in iter_ibm(path, user_fraction, from_year, seed, chunksize, to_year):
         dropped_refunds += dropped
         if not rows.empty:
             parts.append(rows)
