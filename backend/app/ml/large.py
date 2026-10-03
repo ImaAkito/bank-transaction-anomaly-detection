@@ -38,14 +38,15 @@ def _keep_hash(transaction_ids: pd.Series, rate: float) -> np.ndarray:
 
 
 def partition_file(path: str | Path, workdir: str | Path, parts: int, user_fraction: float = 1.0,
-                   from_year: int = 0, seed: int = 42, chunksize: int = 1_000_000) -> dict:
+                   from_year: int = 0, seed: int = 42, chunksize: int = 1_000_000,
+                   to_year: int | None = None) -> dict:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     for old in workdir.glob("part_*.csv"):
         old.unlink()
     stamps: list[np.ndarray] = []
     rows = dropped = frauds = 0
-    for chunk, refunds in iter_ibm(path, user_fraction, from_year, seed, chunksize):
+    for chunk, refunds in iter_ibm(path, user_fraction, from_year, seed, chunksize, to_year):
         dropped += refunds
         if chunk.empty:
             continue
@@ -119,9 +120,9 @@ def auto_parts(path: str | Path, user_fraction: float) -> int:
 
 def build_large_frame(path: str | Path, workdir: str | Path, parts: int | None = None, workers: int | None = None,
                       negative_rate: float = 0.2, user_fraction: float = 1.0, from_year: int = 0,
-                      seed: int = 42) -> tuple[pd.DataFrame, dict]:
+                      seed: int = 42, to_year: int | None = None) -> tuple[pd.DataFrame, dict]:
     parts = parts or auto_parts(path, user_fraction)
-    info = partition_file(path, workdir, parts, user_fraction, from_year, seed)
+    info = partition_file(path, workdir, parts, user_fraction, from_year, seed, to_year=to_year)
     log.info("Строк: %s, мошеннических: %s; расчёт популяционных частот", info["rows"], info["frauds"])
     population = population_from_parts(workdir, info["train_cut"])
     files = sorted(Path(workdir).glob("part_*.csv"))

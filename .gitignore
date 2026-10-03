@@ -19,3 +19,6 @@ datasets/
 *.csv.gz
 *.zip
 *.parquet
+
+# служебные файлы CatBoost
+catboost_info/

@@ -35,6 +35,13 @@ def test_mapping_and_filters(ibm_file):
     assert fraud["recipient_category"] == "online"
 
 
+def test_period_upper_bound(ibm_file):
+    df = load_ibm(ibm_file, user_fraction=1.0, from_year=2000, to_year=2009)
+    assert len(df) == 1 and df["timestamp"].dt.year.tolist() == [2009]
+    both = load_ibm(ibm_file, user_fraction=1.0, from_year=2000, to_year=2015)
+    assert sorted(both["timestamp"].dt.year.unique().tolist()) == [2009, 2015]
+
+
 def test_rows_pass_preprocessing(ibm_file):
     df = load_ibm(ibm_file, user_fraction=1.0, from_year=2010)
     for row in df.to_dict("records"):
