@@ -151,7 +151,11 @@ def model_drift(request: Request, _: Principal = Depends(can_read), db: Session 
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Модель не загружена")
     drift = recent_drift(db, state.model_store.get(), state.settings)
     if drift.get("available"):
+        from app.domain.features import FEATURE_LABELS_RU
+
         metrics.DRIFT_MAX_PSI.set(drift["max_psi"])
+        for item in drift.get("features", []):
+            item["label"] = FEATURE_LABELS_RU.get(item["feature"], item["feature"])
     return drift
 
 

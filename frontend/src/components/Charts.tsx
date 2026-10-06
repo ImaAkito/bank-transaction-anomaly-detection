@@ -1,4 +1,5 @@
 import { RISK_COLORS, formatDate, formatMoney } from "../format";
+import { categoryLabel } from "../labels";
 import { link } from "../router";
 import type { Transaction } from "../types";
 
@@ -7,7 +8,7 @@ export function ActivityChart({ items, highlightId }: { items: Transaction[]; hi
   if (items.length === 0) return <div className="empty">Нет данных</div>;
   const width = 860;
   const height = 240;
-  const pad = { left: 56, right: 16, top: 12, bottom: 28 };
+  const pad = { left: 76, right: 16, top: 12, bottom: 28 };
   const times = items.map((t) => new Date(t.timestamp).getTime());
   const minT = Math.min(...times);
   const maxT = Math.max(...times);
@@ -26,7 +27,7 @@ export function ActivityChart({ items, highlightId }: { items: Transaction[]; hi
         <g key={v}>
           <line x1={pad.left} x2={width - pad.right} y1={y(v)} y2={y(v)} className="grid" />
           <text x={pad.left - 8} y={y(v) + 4} textAnchor="end" className="axis">
-            {new Intl.NumberFormat("ru-RU", { notation: "compact" }).format(10 ** v)}
+            {`${new Intl.NumberFormat("ru-RU", { notation: "compact" }).format(10 ** v)} Br`}
           </text>
         </g>
       ))}
@@ -50,7 +51,7 @@ export function ActivityChart({ items, highlightId }: { items: Transaction[]; hi
               stroke={current ? "var(--text)" : "none"}
               strokeWidth={2}
             >
-              <title>{`${formatDate(t.timestamp)}\n${formatMoney(t.amount, t.currency)} · ${t.category}\nоценка ${t.analysis.anomaly_score.toFixed(2)}`}</title>
+              <title>{`${formatDate(t.timestamp)}\n${formatMoney(t.amount, t.currency)} · ${categoryLabel(t.category)}\nоценка ${t.analysis.anomaly_score.toFixed(2).replace(".", ",")}`}</title>
             </circle>
           </a>
         );
@@ -65,7 +66,7 @@ export function HourHistogram({ counts, typical }: { counts: number[]; typical: 
     <div>
       <div className="hours">
         {counts.map((c, h) => (
-          <div key={h} className="hour-col" title={`${String(h).padStart(2, "0")}:00 — ${c} оп.`}>
+          <div key={h} className="hour-col" title={`${String(h).padStart(2, "0")}:00 — операций: ${c}`}>
             <div className={`hour-bar ${typical.includes(h) ? "typical" : ""}`} style={{ height: `${(c / max) * 100}%` }} />
             <span>{h % 3 === 0 ? h : ""}</span>
           </div>
@@ -75,7 +76,7 @@ export function HourHistogram({ counts, typical }: { counts: number[]; typical: 
   );
 }
 
-export function BarList({ data, limit = 8 }: { data: Record<string, number>; limit?: number }) {
+export function BarList({ data, limit = 8, label = (key: string) => key }: { data: Record<string, number>; limit?: number; label?: (key: string) => string }) {
   const entries = Object.entries(data).slice(0, limit);
   const total = Object.values(data).reduce((a, b) => a + b, 0) || 1;
   if (entries.length === 0) return <div className="muted">нет данных</div>;
@@ -83,11 +84,11 @@ export function BarList({ data, limit = 8 }: { data: Record<string, number>; lim
     <div className="barlist">
       {entries.map(([name, value]) => (
         <div key={name} className="barlist-row">
-          <span className="barlist-name">{name}</span>
+          <span className="barlist-name">{label(name)}</span>
           <div className="barlist-track">
             <div className="barlist-fill" style={{ width: `${(value / total) * 100}%` }} />
           </div>
-          <span className="barlist-value">{value}</span>
+          <span className="barlist-value">{Math.round((value / total) * 100)}%</span>
         </div>
       ))}
     </div>

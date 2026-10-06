@@ -12,7 +12,7 @@ from app.domain.features import compute_features
 from app.domain.preprocessing import PreprocessingError, normalize
 from app.domain.profile import new_profile, update_activity, update_behavior
 
-BASE = dict(currency="RUB", category="groceries", channel="card_pos", recipient_id="M1", recipient_category="merchant")
+BASE = dict(currency="BYN", category="groceries", channel="card_pos", recipient_id="M1", recipient_category="merchant")
 
 
 # ----------------------------------------------------------------- часовой пояс
@@ -86,6 +86,12 @@ def test_auth_roles_and_api_key(auth_client):
     assert c.post("/api/model/reload", headers=admin).status_code == 200
     c.patch("/api/users/viewer1", params={"active": False}, headers=admin)
     assert c.post("/api/auth/login", json={"username": "viewer1", "password": "secret1"}).status_code == 401
+
+    # Администратор не может изменить собственную роль или отключить себя; роли других — может.
+    assert c.patch("/api/users/admin", params={"role": "viewer"}, headers=admin).status_code == 400
+    assert c.patch("/api/users/admin", params={"active": False}, headers=admin).status_code == 400
+    assert c.get("/api/auth/me", headers=admin).json()["role"] == "admin"
+    assert c.patch("/api/users/analyst1", params={"role": "viewer"}, headers=admin).json()["role"] == "viewer"
 
 
 def test_websocket_requires_token(auth_client):

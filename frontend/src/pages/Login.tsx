@@ -16,8 +16,8 @@ export function Login({ onLogin }: { onLogin: () => void }) {
       const result = await api.login(username, password);
       setToken(result.access_token);
       onLogin();
-    } catch {
-      setError("Неверное имя пользователя или пароль");
+    } catch (e) {
+      setError((e as Error).message.startsWith("401") ? "Неверное имя пользователя или пароль" : "Сервер недоступен, попробуйте позже");
     } finally {
       setBusy(false);
     }
@@ -26,11 +26,13 @@ export function Login({ onLogin }: { onLogin: () => void }) {
   return (
     <div className="login-wrap">
       <form className="card login" onSubmit={submit}>
-        <div className="brand">
-          <span className="brand-mark" />
-          Аномальные транзакции
+        <div className="login-brand">
+          <span className="brand-mark large" />
+          <div>
+            <div className="login-title">Мониторинг операций</div>
+            <div className="muted">Выявление нетипичных банковских транзакций</div>
+          </div>
         </div>
-        <p className="muted">Вход для специалистов</p>
         <label className="field">
           <span>Имя пользователя</span>
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
@@ -40,7 +42,7 @@ export function Login({ onLogin }: { onLogin: () => void }) {
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
         </label>
         {error && <div className="alert-error">{error}</div>}
-        <button type="submit" className="btn primary" disabled={busy || !username || !password}>
+        <button type="submit" className="btn primary block" disabled={busy || !username || !password}>
           {busy ? "Вход…" : "Войти"}
         </button>
       </form>

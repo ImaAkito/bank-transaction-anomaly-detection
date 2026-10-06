@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from app.domain.features import FEATURE_LABELS_RU
+from app.domain.labels import category_label, channel_label
 from app.ml.model import ModelBundle
 
 log = logging.getLogger(__name__)
@@ -30,9 +31,11 @@ def _num(value: float, digits: int = 1) -> str:
     return text
 
 
-def _tz_suffix(ctx: dict[str, Any]) -> str:
-    tz = ctx.get("timezone") or "UTC"
-    return " UTC" if tz == "UTC" else f" по местному времени, {tz}"
+CURRENCY_SIGN = "Br"  # базовая валюта — белорусский рубль
+
+
+def _money(value: float) -> str:
+    return f"{_num(value, 2)} {CURRENCY_SIGN}"
 
 
 def _severity_from_ratio(ratio: float, ceiling: float) -> float:
@@ -51,7 +54,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "history",
                 "severity": 0.0,
                 "value": ctx["history_len"],
-                "text": f"История клиента короткая ({ctx['history_len']} оп.), поведенческий профиль ещё не сформирован",
+                "text": f"У клиента пока мало операций ({ctx['history_len']}), профиль поведения ещё формируется",
             }
         )
         return reasons
@@ -64,8 +67,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "amount",
                 "severity": _severity_from_ratio(ratio, 20.0),
                 "value": ratio,
-                "text": f"Сумма операции в {_num(ratio)} раза превышает медианную сумму операций клиента "
-                f"({_num(ctx['median_amount'], 0)} в базовой валюте)",
+                "text": f"Сумма в {_num(ratio)} раза превышает медианную сумму клиента ({_money(ctx['median_amount'])})",
             }
         )
     elif features["amount_zscore"] >= 3.0:
@@ -75,21 +77,19 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "amount",
                 "severity": min(1.0, features["amount_zscore"] / 8.0),
                 "value": features["amount_zscore"],
-                "text": f"Сумма операции существенно выше обычной для клиента (z-оценка {_num(features['amount_zscore'])})",
+                "text": "Сумма заметно выше обычной для клиента",
             }
         )
 
     # Нетипичное время: по «сырой» доле операций клиента в этот час; на коротких историях вывод ненадёжен.
     if ctx["history_len"] >= MIN_HISTORY_FOR_TIME and ctx["hour_share"] < 0.03:
-        share = ctx["hour_share"]
         reasons.append(
             {
                 "code": "unusual_time",
                 "type": "time",
                 "severity": 0.9 if features["is_night"] else 0.7,
                 "value": ctx["hour"],
-                "text": f"Операция выполнена в нетипичное для клиента время ({ctx['hour']:02d}:00{_tz_suffix(ctx)}; "
-                f"в этот час приходилось {_num(share * 100, 1)}% его операций)",
+                "text": f"Операция в {ctx['hour']:02d}:00 — нетипичное для клиента время",
             }
         )
 
@@ -100,7 +100,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "category",
                 "severity": 0.8 * features["is_new_category"],
                 "value": ctx["category"],
-                "text": f"Данная категория операции («{ctx['category']}») ранее не использовалась клиентом",
+                "text": f"Категория «{category_label(ctx['category'])}» ранее не использовалась клиентом",
             }
         )
     if features["is_new_channel"] > 0:
@@ -110,7 +110,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "channel",
                 "severity": 0.6 * features["is_new_channel"],
                 "value": ctx["channel"],
-                "text": f"Канал проведения операции («{ctx['channel']}») ранее не использовался клиентом",
+                "text": f"Канал «{channel_label(ctx['channel'])}» ранее не использовался клиентом",
             }
         )
     if features["is_new_currency"] > 0:
@@ -120,7 +120,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "currency",
                 "severity": 0.6 * features["is_new_currency"],
                 "value": ctx["currency"],
-                "text": f"Валюта операции ({ctx['currency']}) ранее не использовалась клиентом",
+                "text": f"Валюта {ctx['currency']} ранее не использовалась клиентом",
             }
         )
     if features.get("novel_rare_region", 0.0) >= RARE_REGION_SURPRISAL:
@@ -130,7 +130,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "recipient",
                 "severity": min(1.0, features["novel_rare_region"] / 8.0),
                 "value": features["novel_rare_region"],
-                "text": "Регион получателя новый для клиента и редко встречается среди всех клиентов",
+                "text": "Регион получателя новый для клиента и редкий среди всех клиентов",
             }
         )
     if features.get("novel_rare_category", 0.0) >= RARE_REGION_SURPRISAL:
@@ -140,7 +140,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "category",
                 "severity": min(1.0, features["novel_rare_category"] / 8.0),
                 "value": features["novel_rare_category"],
-                "text": f"Категория «{ctx['category']}» новая для клиента и редко встречается среди всех клиентов",
+                "text": f"Категория «{category_label(ctx['category'])}» новая для клиента и редкая среди всех клиентов",
             }
         )
     if features["is_new_recipient"] > 0:
@@ -150,7 +150,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "recipient",
                 "severity": 0.3 * features["is_new_recipient"],
                 "value": ctx["recipient_id"],
-                "text": "Получатель платежа ранее не встречался в истории клиента",
+                "text": "Новый получатель",
             }
         )
 
@@ -162,8 +162,7 @@ def build_reasons(features: dict[str, float], ctx: dict[str, Any]) -> list[dict[
                 "type": "velocity",
                 "severity": min(1.0, 0.4 + 0.1 * count),
                 "value": count,
-                "text": f"За последний час клиент совершил {count} операций (за сутки {ctx['count_24h']}), "
-                f"при обычной интенсивности около {_num(ctx['avg_daily'])} в сутки",
+                "text": f"{count} операций за последний час при обычных {_num(ctx['avg_daily'])} в сутки",
             }
         )
 

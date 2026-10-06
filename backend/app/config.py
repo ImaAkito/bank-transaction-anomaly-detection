@@ -5,13 +5,17 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Курсы к белорусскому рублю (BYN) для пересчёта сумм в базовую валюту. Значения приблизительные
+# и предназначены для демонстрации; в эксплуатации их следует загружать из актуального источника курсов.
 DEFAULT_CURRENCY_RATES: dict[str, float] = {
-    "RUB": 1.0,
-    "USD": 90.0,
-    "EUR": 100.0,
-    "CNY": 12.5,
-    "KZT": 0.2,
-    "TRY": 3.0,
+    "BYN": 1.0,
+    "USD": 3.0,
+    "EUR": 3.4,
+    "RUB": 0.037,
+    "PLN": 0.8,
+    "CNY": 0.42,
+    "KZT": 0.006,
+    "TRY": 0.09,
 }
 
 
@@ -37,7 +41,7 @@ class Settings(BaseSettings):
     risk_high: float | None = None
 
     min_history_for_profile: int = Field(default=5, ge=1)
-    base_currency: str = "RUB"
+    base_currency: str = "BYN"
     currency_rates: dict[str, float] = Field(default_factory=lambda: dict(DEFAULT_CURRENCY_RATES))
 
     explain_shap: bool = True

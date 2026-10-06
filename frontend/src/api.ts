@@ -97,7 +97,7 @@ export const api = {
     }),
   clients: (search = "", onlyFlagged = false) =>
     request<ClientRow[]>(`/api/clients?limit=100&search=${encodeURIComponent(search)}&only_flagged=${onlyFlagged}`),
-  client: (id: string) => request<ClientDetail>(`/api/clients/${encodeURIComponent(id)}`),
+  client: (id: string, limit = 200) => request<ClientDetail>(`/api/clients/${encodeURIComponent(id)}?limit=${limit}`),
   alerts: (clientId?: string) =>
     request<AlertHistoryRow[]>(`/api/alerts/history?limit=50${clientId ? `&client_id=${encodeURIComponent(clientId)}` : ""}`),
   stats: () => request<Stats>("/api/stats"),

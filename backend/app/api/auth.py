@@ -50,6 +50,8 @@ def update_user(username: str, active: bool | None = None, role: str | None = No
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Пользователь не найден")
     if username == principal.username and active is False:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя отключить собственную учётную запись")
+    if username == principal.username and role is not None and role != user.role:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя изменить роль собственной учётной записи")
     if role is not None:
         if role not in ("viewer", "analyst", "admin"):
             raise HTTPException(422, "Неизвестная роль")

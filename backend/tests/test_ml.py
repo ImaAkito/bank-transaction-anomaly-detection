@@ -69,7 +69,7 @@ def test_reasons_and_summary_texts():
                      "rate_ratio": 1.0})
     ctx = {"warm": True, "history_len": 50, "median_amount": 1000.0, "amount_ratio": 8.4, "hour": 3,
            "hour_share": 0.0, "count_1h": 0, "count_24h": 1, "avg_daily": 2.0, "category": "jewelry",
-           "channel": "web", "currency": "RUB", "recipient_id": None}
+           "channel": "web", "currency": "BYN", "recipient_id": None}
     reasons = build_reasons(features, ctx)
     texts = " | ".join(r["text"] for r in reasons)
     assert "в 8,4 раза превышает медианную сумму" in texts
