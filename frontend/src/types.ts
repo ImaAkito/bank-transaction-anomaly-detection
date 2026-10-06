@@ -158,7 +158,7 @@ export interface DriftReport {
   max_psi?: number;
   flagged_share?: number;
   expected_flagged_share?: number;
-  features?: { feature: string; psi: number; level: "ok" | "warning" | "alert" }[];
+  features?: { feature: string; label?: string; psi: number; level: "ok" | "warning" | "alert" }[];
   thresholds?: { warning: number; alert: number };
 }
 

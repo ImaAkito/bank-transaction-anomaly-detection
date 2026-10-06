@@ -3,14 +3,24 @@
 Сначала быстро отправляется «исторический» период (формирует профили клиентов), затем транзакции
 поступают с заданной скоростью, как в живом потоке. Время событий берётся из смоделированной шкалы времени.
 
+Режим --loop: каждый следующий проход создаёт новую группу клиентов со своими номерами (C00040, C00041, ...),
+а не повторяет операции прежних клиентов за те же даты — иначе у клиента накапливалось бы по несколько
+наложенных историй и нереалистичная интенсивность. Номер следующей группы хранится в файле --state-file,
+поэтому после перезапуска симулятора клиенты не повторяются.
+
+Время операций генерируется как местное время клиента (--timezone, например Europe/Minsk) и передаётся в API в UTC.
+
 Запуск: python -m app.simulation.simulator --api http://localhost:8000 --rate 5
 """
 import argparse
+import json
 import os
 import logging
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -35,7 +45,10 @@ def wait_for_api(client: httpx.Client, api: str, timeout: float = 120.0) -> None
 
 
 def payload_from_row(row: dict, timezone: str | None = None) -> dict:
+    """Тело запроса для API. Если задан часовой пояс, время из генератора считается местным временем клиента."""
     ts = pd.Timestamp(row["timestamp"]).to_pydatetime()
+    if timezone:
+        ts = ts.replace(tzinfo=ZoneInfo(timezone)).astimezone(ZoneInfo("UTC"))
     return {
         "transaction_id": row["transaction_id"],
         "client_id": row["client_id"],
@@ -52,6 +65,25 @@ def payload_from_row(row: dict, timezone: str | None = None) -> dict:
     }
 
 
+def read_cohort(path: Path | None) -> int:
+    if path is None or not path.exists():
+        return 0
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("next_cohort", 0))
+    except (ValueError, OSError):
+        return 0
+
+
+def write_cohort(path: Path | None, cohort: int) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"next_cohort": cohort}), encoding="utf-8")
+    except OSError:
+        log.warning("Не удалось сохранить состояние симулятора в %s", path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api", default="http://localhost:8000")
@@ -66,16 +98,22 @@ def main() -> None:
     parser.add_argument("--api-key", default=os.environ.get("INGEST_API_KEY"),
                         help="ключ приёма транзакций (X-API-Key), нужен при включённой аутентификации")
     parser.add_argument("--timezone", default=None, help="часовой пояс клиентов (IANA), например Europe/Moscow")
-    parser.add_argument("--loop", action="store_true", help="после завершения начать заново с новым seed")
+    parser.add_argument("--loop", action="store_true", help="после завершения продолжить с новой группой клиентов")
+    parser.add_argument("--state-file", default=os.environ.get("SIMULATOR_STATE_FILE", "data/simulator_state.json"),
+                        help="файл с номером следующей группы клиентов (пустая строка — не сохранять)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", stream=sys.stdout)
 
     endpoint = "/api/transactions/enqueue" if args.mode == "enqueue" else "/api/transactions"
-    seed = args.seed
+    state_file = Path(args.state_file) if args.state_file else None
+    cohort = read_cohort(state_file)
     headers = {"X-API-Key": args.api_key} if args.api_key else {}
     with httpx.Client(timeout=30, headers=headers) as client:
         wait_for_api(client, args.api)
         while True:
+            seed = args.seed + cohort
+            # Номер группы сохраняется сразу: если симулятор прервут, следующий запуск начнёт с новых клиентов.
+            write_cohort(state_file, cohort + 1)
             total_days = args.history_days + args.live_days
             start = (datetime.now(timezone.utc) - timedelta(days=total_days)).replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -88,12 +126,13 @@ def main() -> None:
                 anomaly_rate=args.anomaly_rate,
                 anomaly_start_day=min(7, args.history_days),
                 id_prefix="SIM",
+                client_offset=cohort * args.clients,
             )
             live_from = start + timedelta(days=args.history_days)
             history = df[df["timestamp"] < live_from]
             live = df[df["timestamp"] >= live_from]
-            log.info("Сгенерировано %s транзакций: история %s, живой поток %s (seed=%s)",
-                     len(df), len(history), len(live), seed)
+            log.info("Группа %s: клиенты C%05d–C%05d, %s транзакций (история %s, живой поток %s)",
+                     cohort, cohort * args.clients, (cohort + 1) * args.clients - 1, len(df), len(history), len(live))
 
             failed = 0
             for i, row in enumerate(history.to_dict("records"), 1):
@@ -115,7 +154,7 @@ def main() -> None:
             log.info("Поток завершён")
             if not args.loop:
                 break
-            seed += 1
+            cohort += 1
 
 
 if __name__ == "__main__":

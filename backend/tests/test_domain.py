@@ -11,7 +11,7 @@ from app.domain.profile import new_profile, summarize, typical_hours, update_act
 
 
 def make_tx(i=0, amount=1000.0, hour=12, category="groceries", channel="card_pos", recipient="M1",
-            currency="RUB", ts=None, day=0):
+            currency="BYN", ts=None, day=0):
     ts = ts or datetime(2025, 3, 1, hour, 0, tzinfo=timezone.utc) + timedelta(days=day, minutes=i)
     return normalize(
         {"transaction_id": f"t{i}", "client_id": "c", "timestamp": ts, "amount": amount, "currency": currency,
@@ -37,14 +37,14 @@ def test_normalize_cleans_and_converts():
         DEFAULT_CURRENCY_RATES,
     )
     assert tx.transaction_id == "a" and tx.currency == "USD" and tx.category == "groceries" and tx.channel == "web"
-    assert tx.ts.tzinfo is not None and tx.amount_base == 900.0
+    assert tx.ts.tzinfo is not None and tx.amount_base == 10 * DEFAULT_CURRENCY_RATES["USD"]
 
 
 @pytest.mark.parametrize("patch", [{"amount": -5}, {"amount": float("nan")}, {"currency": "XXX"},
                                    {"category": ""}, {"timestamp": "2025-01-01"}, {"client_id": " "}])
 def test_normalize_rejects_invalid(patch):
     raw = {"transaction_id": "a", "client_id": "c", "timestamp": datetime(2025, 1, 1), "amount": 10,
-           "currency": "RUB", "category": "x", **patch}
+           "currency": "BYN", "category": "x", **patch}
     with pytest.raises(PreprocessingError):
         normalize(raw, DEFAULT_CURRENCY_RATES)
 
@@ -149,7 +149,7 @@ def test_population_surprisal_and_novelty_interaction():
         feed(profile, make_tx(i, day=i // 4))  # клиент использует только «merchant»-получателей
     common = make_tx(99, day=11)
     rare = normalize(
-        {"transaction_id": "r", "client_id": "c", "timestamp": common.ts, "amount": 1000, "currency": "RUB",
+        {"transaction_id": "r", "client_id": "c", "timestamp": common.ts, "amount": 1000, "currency": "BYN",
          "category": "jewelry", "channel": "web", "recipient_id": "x", "recipient_category": "italy"},
         DEFAULT_CURRENCY_RATES,
     )

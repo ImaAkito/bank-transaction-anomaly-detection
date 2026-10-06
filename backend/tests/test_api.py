@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timedelta, timezone
 
-BASE = dict(client_id="X1", currency="RUB", category="groceries", channel="card_pos",
+BASE = dict(client_id="X1", currency="BYN", category="groceries", channel="card_pos",
             recipient_id="M1", recipient_category="merchant")
 
 

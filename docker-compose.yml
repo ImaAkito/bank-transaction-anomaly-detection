@@ -16,7 +16,7 @@ x-backend-env: &backend-env
   ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
   INGEST_API_KEY: ${INGEST_API_KEY:-demo-ingest-key}
-  DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
+  DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-Europe/Minsk}
 
 # Образ backend собирает только сервис trainer; остальные backend-сервисы используют готовый образ.
 # Если образ собирают несколько сервисов сразу, Docker Desktop может завершить параллельную сборку
@@ -129,9 +129,12 @@ services:
     <<: *backend
     command: >
       python -m app.simulation.simulator --api http://api:8000 --mode enqueue
-      --clients ${SIM_CLIENTS:-40} --rate ${SIM_RATE:-4} --loop
+      --clients ${SIM_CLIENTS:-40} --rate ${SIM_RATE:-4} --timezone ${DEFAULT_TIMEZONE:-Europe/Minsk} --loop
     environment:
       INGEST_API_KEY: ${INGEST_API_KEY:-demo-ingest-key}
+    # Номер следующей группы клиентов (data/simulator_state.json): после перезапуска клиенты не повторяются.
+    volumes:
+      - simdata:/app/data
     depends_on:
       api: {condition: service_healthy}
       worker-0: {condition: service_started}
@@ -141,4 +144,5 @@ services:
 volumes:
   pgdata:
   redisdata:
+  simdata:
   models:

@@ -2,25 +2,34 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { RiskBadge, ScoreBar, StatusBadge } from "../components/Badges";
 import { ActivityChart } from "../components/Charts";
+import { ClientTransactions } from "../components/ClientTransactions";
 import { FactorBars } from "../components/FactorBars";
-import { TransactionTable } from "../components/TransactionTable";
-import { formatDate, formatMoney, formatNumber, TYPE_LABELS } from "../format";
+import { formatDate, formatHourRanges, formatMoney, formatNumber } from "../format";
+import { categoryLabel, channelLabel, recipientLabel } from "../labels";
 import { link } from "../router";
 import type { ClientDetail, Transaction } from "../types";
 import { canReview, useSession } from "../session";
 import { useLiveFeed } from "../useLiveFeed";
 
+const DECISIONS = {
+  reviewed_normal: "Операция отмечена как нормальная",
+  reviewed_suspicious: "Операция отмечена как подозрительная",
+  needs_review: "Операция возвращена на проверку",
+} as const;
+
 export function TransactionDetail({ id }: { id: string }) {
   const [tx, setTx] = useState<Transaction | null>(null);
   const [client, setClient] = useState<ClientDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const [comment, setComment] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
   const me = useSession();
   const [reviewer, setReviewer] = useState(() => {
     try {
-      return localStorage.getItem("reviewer") ?? "analyst";
+      return localStorage.getItem("reviewer") ?? "";
     } catch {
-      return "analyst";
+      return "";
     }
   });
   const [busy, setBusy] = useState(false);
@@ -28,11 +37,12 @@ export function TransactionDetail({ id }: { id: string }) {
   useEffect(() => {
     setTx(null);
     setClient(null);
+    setSaved(null);
     api
       .transaction(id)
       .then((t) => {
         setTx(t);
-        return api.client(t.client_id);
+        return api.client(t.client_id, 300);
       })
       .then(setClient)
       .catch((e: Error) => setError(e.message));
@@ -42,18 +52,22 @@ export function TransactionDetail({ id }: { id: string }) {
     if (event.data.transaction_id === id) setTx(event.data);
   });
 
-  const review = async (status: string) => {
+  const review = async (status: keyof typeof DECISIONS) => {
     setBusy(true);
+    setSaved(null);
     try {
       try {
-        localStorage.setItem("reviewer", reviewer);
+        if (reviewer) localStorage.setItem("reviewer", reviewer);
       } catch {
         /* хранилище недоступно */
       }
-      const updated = await api.review(id, status, reviewer, comment);
+      const updated = await api.review(id, status, reviewer || "специалист", comment);
       setTx(updated);
       setComment("");
-      setClient(await api.client(updated.client_id));
+      setSaved(DECISIONS[status]);
+      setError(null);
+      setReloadKey((k) => k + 1);
+      setClient(await api.client(updated.client_id, 300));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -61,54 +75,52 @@ export function TransactionDetail({ id }: { id: string }) {
     }
   };
 
-  if (error && !tx) return <div className="alert-error">Ошибка: {error}</div>;
-  if (!tx) return <div className="card">Загрузка…</div>;
+  if (error && !tx) return <div className="alert-error">Не удалось открыть операцию: {error}</div>;
+  if (!tx) return <div className="card loading">Загрузка операции…</div>;
   const a = tx.analysis;
+  const foreign = tx.currency !== "BYN";
 
   return (
     <div className="stack">
+      <a href="#/transactions" className="back-link">
+        ← Все операции
+      </a>
       {error && <div className="alert-error">Ошибка: {error}</div>}
-      <div className="card">
-        <div className="detail-head">
-          <div>
-            <div className="muted">
-              <a href="#/transactions">← К списку</a>
-            </div>
-            <h2 className="mono">{tx.transaction_id}</h2>
-            <div className="muted">
-              Клиент <a href={link("clients", tx.client_id)}>{tx.client_id}</a> · {formatDate(tx.timestamp)}
-            </div>
+
+      <div className={`card hero hero-${a.risk_level}`}>
+        <div className="hero-main">
+          <div className="hero-kicker">
+            {categoryLabel(tx.category)} · {channelLabel(tx.channel)}
           </div>
-          <div className="verdict">
-            <div className="verdict-row">
-              <span>Уровень риска:</span> <RiskBadge level={a.risk_level} />
-            </div>
-            <div className="verdict-row">
-              <span>Оценка аномальности:</span> <strong className="big">{formatNumber(a.anomaly_score, 2)}</strong>
-            </div>
-            <ScoreBar score={a.anomaly_score} level={a.risk_level} />
-            <StatusBadge status={a.status} />
+          <h1 className="hero-title">
+            {formatMoney(tx.amount, tx.currency)}
+            {foreign && <span className="hero-sub"> ≈ {formatMoney(tx.amount_base)}</span>}
+          </h1>
+          <div className="hero-meta">
+            <span>{formatDate(tx.timestamp)}</span>
+            <span>
+              Клиент <a href={link("clients", tx.client_id)}>{tx.client_id}</a>
+            </span>
+            <span className="mono muted">{tx.transaction_id}</span>
           </div>
         </div>
-        <p className="disclaimer">
-          Оценка является аналитической: она показывает отличие операции от типичного поведения клиента и не означает, что операция мошенническая. Решение принимает специалист.
-        </p>
+        <div className="hero-verdict">
+          <RiskBadge level={a.risk_level} large />
+          <div className="verdict-score">
+            <span className="muted">Оценка аномальности</span>
+            <strong>{formatNumber(a.anomaly_score, 2)}</strong>
+          </div>
+          <ScoreBar score={a.anomaly_score} level={a.risk_level} />
+          <StatusBadge status={a.status} />
+        </div>
       </div>
 
       <div className="grid-2">
         <div className="card">
-          <h3>Почему сработала система</h3>
-          <p className="summary">{a.summary}</p>
-          {a.deviation_types.length > 0 && (
-            <div className="chips static">
-              {a.deviation_types.map((t) => (
-                <span key={t} className="chip on">
-                  {TYPE_LABELS[t] ?? t}
-                </span>
-              ))}
-            </div>
-          )}
-          {a.reasons.length > 0 ? (
+          <h3>{a.risk_level === "low" ? "Результат анализа" : "Почему операция отмечена"}</h3>
+          {a.risk_level === "low" && a.reasons.length === 0 ? (
+            <p className="lead">Операция соответствует обычному поведению клиента.</p>
+          ) : a.reasons.length > 0 ? (
             <ul className="reasons">
               {a.reasons.map((r) => (
                 <li key={r.code} className={r.severity >= 0.7 ? "strong" : ""}>
@@ -117,45 +129,31 @@ export function TransactionDetail({ id }: { id: string }) {
               ))}
             </ul>
           ) : (
-            <div className="muted">Отдельных факторов отклонения не выявлено</div>
+            <p className="lead">Отклонение выявлено моделью по совокупности признаков, без одного явного фактора.</p>
           )}
-          {!a.profile_updated && (
-            <div className="note">Операция удержана вне профиля клиента до решения специалиста: она не искажает типичное поведение.</div>
-          )}
+          {!a.profile_updated && <p className="hint">Операция не учтена в профиле клиента до решения специалиста.</p>}
         </div>
 
         <div className="card">
-          <h3>Параметры операции</h3>
+          <h3>Детали операции</h3>
           <dl className="props">
             <dt>Сумма</dt>
             <dd>
               {formatMoney(tx.amount, tx.currency)}
-              {tx.currency !== "RUB" && <span className="muted"> (≈ {formatMoney(tx.amount_base, "RUB")})</span>}
+              {foreign && <span className="muted"> ≈ {formatMoney(tx.amount_base)}</span>}
             </dd>
             <dt>Категория</dt>
-            <dd>{tx.category}</dd>
+            <dd>{categoryLabel(tx.category)}</dd>
             <dt>Канал</dt>
-            <dd>{tx.channel}</dd>
+            <dd>{channelLabel(tx.channel)}</dd>
             <dt>Получатель</dt>
-            <dd>
-              {tx.recipient_id ?? "—"}
-              {tx.recipient_category && <span className="muted"> ({tx.recipient_category})</span>}
-            </dd>
-            <dt>Местное время клиента</dt>
-            <dd>
-              {new Date(tx.local_time).toLocaleString("ru-RU", { timeZone: tx.timezone, dateStyle: "short", timeStyle: "medium" })}
-              <span className="muted"> ({tx.timezone})</span>
-            </dd>
-            <dt>Получена системой</dt>
-            <dd>{formatDate(tx.received_at)}</dd>
-            <dt>Модель</dt>
-            <dd>
-              {a.model_kind} <span className="muted">· {a.model_version} · {formatNumber(a.latency_ms, 1)} мс</span>
-            </dd>
-            {tx.simulation_label !== null && (
+            <dd>{tx.recipient_category ? recipientLabel(tx.recipient_category) : "—"}</dd>
+            <dt>Дата и время</dt>
+            <dd>{formatDate(tx.timestamp)}</dd>
+            {client && (
               <>
-                <dt>Метка симулятора</dt>
-                <dd>{tx.simulation_label ? `аномалия (${tx.simulation_anomaly_type ?? "—"})` : "нормальная операция"}</dd>
+                <dt>Обычное время клиента</dt>
+                <dd>{formatHourRanges(client.profile.typical_hours)}</dd>
               </>
             )}
           </dl>
@@ -163,51 +161,52 @@ export function TransactionDetail({ id }: { id: string }) {
       </div>
 
       <div className="card">
-        <h3>Факторы, повлиявшие на оценку (SHAP)</h3>
-        <FactorBars factors={a.factors} />
-      </div>
-
-      <div className="card">
         <h3>Решение специалиста</h3>
         {a.reviewed_at && (
-          <div className="note">
+          <p className="hint">
             Последнее решение: {a.reviewed_by ?? "—"}, {formatDate(a.reviewed_at)}
             {a.review_comment && <> — «{a.review_comment}»</>}
-          </div>
+          </p>
         )}
-        {!canReview(me) && <div className="muted">Решения по операциям принимают аналитики и администраторы.</div>}
-        <div className="review-form" hidden={!canReview(me)}>
-          {!me.auth_enabled && (
-            <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Ваше имя" aria-label="Ваше имя" />
-          )}
-          <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий (необязательно)" aria-label="Комментарий" className="grow" />
-          <button type="button" className="btn ok" disabled={busy} onClick={() => review("reviewed_normal")}>
-            Операция нормальная
-          </button>
-          <button type="button" className="btn danger" disabled={busy} onClick={() => review("reviewed_suspicious")}>
-            Подозрительная
-          </button>
-          <button type="button" className="btn" disabled={busy || a.status === "needs_review"} onClick={() => review("needs_review")}>
-            Вернуть на проверку
-          </button>
-        </div>
+        {saved && <div className="alert-success">{saved}</div>}
+        {canReview(me) ? (
+          <div className="review-form">
+            {!me.auth_enabled && (
+              <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Ваше имя" aria-label="Ваше имя" />
+            )}
+            <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий (необязательно)" aria-label="Комментарий" className="grow" />
+            <div className="review-actions">
+              <button type="button" className="btn ok" disabled={busy} onClick={() => review("reviewed_normal")}>
+                ✓ Нормальная
+              </button>
+              <button type="button" className="btn danger" disabled={busy} onClick={() => review("reviewed_suspicious")}>
+                ⚠ Подозрительная
+              </button>
+              {a.status !== "needs_review" && a.status !== "normal" && (
+                <button type="button" className="btn" disabled={busy} onClick={() => review("needs_review")}>
+                  Вернуть на проверку
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="muted">Решения по операциям принимают аналитики и администраторы.</p>
+        )}
       </div>
 
+      <details className="card details">
+        <summary>Как модель оценила операцию</summary>
+        <p className="muted">Признаки, которые сильнее всего повлияли на оценку аномальности.</p>
+        <FactorBars factors={a.factors} />
+      </details>
+
       <div className="card">
-        <h3>Активность клиента</h3>
-        {client ? (
-          <>
-            <ActivityChart items={client.recent} highlightId={tx.transaction_id} />
-            <div className="muted">
-              Медианная сумма клиента: {client.profile.median_amount ? formatMoney(client.profile.median_amount, "RUB") : "—"}
-              {" · "}типичные часы: {client.profile.typical_hours.length ? client.profile.typical_hours.map((h) => `${h}:00`).join(", ") : "—"}
-              {" · "}категории: {Object.keys(client.profile.categories).slice(0, 5).join(", ") || "—"}
-            </div>
-            <TransactionTable items={client.recent.slice(0, 15)} showClient={false} highlightId={tx.transaction_id} />
-          </>
-        ) : (
-          <div className="muted">Загрузка истории…</div>
-        )}
+        <div className="card-head">
+          <h3>Операции клиента {tx.client_id}</h3>
+          <a href={link("clients", tx.client_id)}>Профиль клиента →</a>
+        </div>
+        {client ? <ActivityChart items={client.recent} highlightId={tx.transaction_id} /> : <div className="muted">Загрузка…</div>}
+        <ClientTransactions clientId={tx.client_id} highlightId={tx.transaction_id} reloadKey={reloadKey} />
       </div>
     </div>
   );

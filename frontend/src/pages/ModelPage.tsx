@@ -1,16 +1,32 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { formatDate, formatNumber, formatPercent } from "../format";
+import { MODEL_KIND_LABELS } from "../labels";
 import { useSession } from "../session";
 import type { Aggregate, DriftReport, ExperimentSummary, ModelEvent, ModelInfo } from "../types";
 
-const pm = (a: Aggregate) => `${formatNumber(a.mean, 3)} ± ${formatNumber(a.std, 3)}`;
-const LEVEL_LABELS = { ok: "в норме", warning: "предупреждение", alert: "значительный дрейф" } as const;
+const pm = (a: Aggregate) => (a.std > 0 ? `${formatNumber(a.mean, 3)} ± ${formatNumber(a.std, 3)}` : formatNumber(a.mean, 3));
+const LEVEL_LABELS = { ok: "в норме", warning: "есть изменения", alert: "значительные изменения" } as const;
 const EVENT_LABELS: Record<string, string> = {
-  retrained: "Переобучение: новая модель развёрнута",
-  retrain_rejected: "Переобучение: кандидат отклонён проверкой",
-  retrain_skipped: "Переобучение пропущено",
-  retrain_failed: "Переобучение: ошибка",
+  retrained: "Модель переобучена и обновлена",
+  retrain_rejected: "Новая модель отклонена проверкой качества",
+  retrain_skipped: "Переобучение не потребовалось",
+  retrain_failed: "Ошибка переобучения",
+};
+
+/** Понятные названия наборов результатов экспериментов (каталоги backend/experiments/*). */
+const RUN_TITLES: Record<string, string> = {
+  results: "Синтетические данные",
+  results_ibm: "IBM, 5% клиентов",
+  results_ibm_full: "IBM, полный объём: базовые признаки",
+  results_ibm_full_pop: "IBM, полный объём: с популяционными признаками",
+  results_ibm_full_notime: "IBM, полный объём: итоговая конфигурация",
+  results_ibm_final: "IBM, финальная проверка (2003–2009)",
+};
+const runTitle = (name: string) => {
+  if (RUN_TITLES[name]) return RUN_TITLES[name];
+  const prelim = name.match(/^results_ibm(\d+)$/);
+  return prelim ? `IBM, предварительный прогон ${prelim[1]}` : name;
 };
 
 function Experiments({ summary }: { summary: ExperimentSummary }) {
@@ -18,7 +34,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
   return (
     <>
       <div className="card">
-        <h3>Сравнение методов (тестовая выборка, среднее ± σ по {summary.seeds.length} наборам)</h3>
+        <h3>Сравнение методов на тестовой части</h3>
         <div className="table-wrap">
           <table>
             <thead>
@@ -29,14 +45,14 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
                 <th className="num">Recall</th>
                 <th className="num">F1</th>
                 <th className="num">ROC-AUC</th>
-                <th className="num">AP (PR-AUC)</th>
+                <th className="num">AP</th>
               </tr>
             </thead>
             <tbody>
               {Object.entries(summary.models).map(([name, r]) => (
                 <tr key={name}>
-                  <td>{name}</td>
-                  <td>{r.supervised ? "с учителем" : "без учителя"}</td>
+                  <td className="nowrap">{name}</td>
+                  <td className="muted-cell">{r.supervised ? "с учителем" : "без учителя"}</td>
                   <td className="num">{pm(r.val_threshold.precision)}</td>
                   <td className="num">{pm(r.val_threshold.recall)}</td>
                   <td className="num">{pm(r.val_threshold.f1)}</td>
@@ -47,11 +63,15 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
             </tbody>
           </table>
         </div>
-        <div className="muted">Порог классификации выбран по максимуму F1 на валидационной части.</div>
+        <p className="hint">
+          Порог выбран по максимуму F1 на валидационной части. AP (Average Precision) — средняя точность по всем порогам; при редких аномалиях
+          её сравнивают с долей аномалий, а не с единицей.
+          {summary.seeds.length > 1 && ` Значения — среднее ± отклонение по ${summary.seeds.length} наборам.`}
+        </p>
       </div>
       {budgets.length > 0 && (
         <div className="card">
-          <h3>Фиксированный бюджет оповещений (Precision / Recall)</h3>
+          <h3>Если проверять только часть операций с наибольшей оценкой</h3>
           <div className="table-wrap">
             <table>
               <thead>
@@ -59,7 +79,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
                   <th>Метод</th>
                   {budgets.map((b) => (
                     <th key={b} className="num">
-                      Топ {formatPercent(Number(b), 1)}
+                      Проверено {formatPercent(Number(b), 1)}: точность / найдено
                     </th>
                   ))}
                 </tr>
@@ -67,10 +87,10 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
               <tbody>
                 {Object.entries(summary.models).map(([name, r]) => (
                   <tr key={name}>
-                    <td>{name}</td>
+                    <td className="nowrap">{name}</td>
                     {budgets.map((b) => (
                       <td key={b} className="num">
-                        {r.budget ? `${formatNumber(r.budget[b].precision.mean, 3)} / ${formatNumber(r.budget[b].recall.mean, 3)}` : "—"}
+                        {r.budget ? `${formatPercent(r.budget[b].precision.mean, 1)} / ${formatPercent(r.budget[b].recall.mean, 1)}` : "—"}
                       </td>
                     ))}
                   </tr>
@@ -81,31 +101,31 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
         </div>
       )}
       {Object.keys(summary.ablation).length > 0 && (
-      <div className="card">
-        <h3>Влияние групп признаков (Isolation Forest)</h3>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Набор признаков</th>
-                <th className="num">Признаков</th>
-                <th className="num">ROC-AUC</th>
-                <th className="num">AP (PR-AUC)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(summary.ablation).map(([name, r]) => (
-                <tr key={name}>
-                  <td>{name}</td>
-                  <td className="num">{r.n_features}</td>
-                  <td className="num">{pm(r.roc_auc)}</td>
-                  <td className="num">{pm(r.pr_auc)}</td>
+        <div className="card">
+          <h3>Влияние групп признаков (Isolation Forest)</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Набор признаков</th>
+                  <th className="num">Признаков</th>
+                  <th className="num">ROC-AUC</th>
+                  <th className="num">AP</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {Object.entries(summary.ablation).map(([name, r]) => (
+                  <tr key={name}>
+                    <td className="nowrap">{name}</td>
+                    <td className="num">{r.n_features}</td>
+                    <td className="num">{pm(r.roc_auc)}</td>
+                    <td className="num">{pm(r.pr_auc)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
       )}
     </>
   );
@@ -113,27 +133,29 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
 
 function DriftPanel({ drift }: { drift: DriftReport | null }) {
   if (!drift) return <div className="muted">Загрузка…</div>;
-  if (!drift.available) return <div className="muted">{drift.reason}</div>;
+  if (!drift.available) return <p className="muted">{drift.reason}</p>;
   return (
     <>
-      <p>
-        Состояние: <strong className={`level-${drift.status}`}>{LEVEL_LABELS[drift.status!]}</strong> · окно {drift.window} операций ·
-        максимальный PSI {formatNumber(drift.max_psi!, 3)} · доля оповещений {formatPercent(drift.flagged_share!)} (при обучении{" "}
-        {formatPercent(drift.expected_flagged_share!)})
+      <p className="lead">
+        Состояние: <strong className={`level-${drift.status}`}>{LEVEL_LABELS[drift.status!]}</strong>
+      </p>
+      <p className="muted">
+        Проверено последних операций: {formatNumber(drift.window!, 0)}. Доля отмеченных операций {formatPercent(drift.flagged_share!)} (при обучении{" "}
+        {formatPercent(drift.expected_flagged_share!)}).
       </p>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Признак</th>
-              <th className="num">PSI</th>
-              <th>Уровень</th>
+              <th className="num">Индекс PSI</th>
+              <th>Оценка</th>
             </tr>
           </thead>
           <tbody>
-            {drift.features!.slice(0, 10).map((f) => (
+            {drift.features!.slice(0, 8).map((f) => (
               <tr key={f.feature}>
-                <td className="mono">{f.feature}</td>
+                <td>{f.label ?? f.feature}</td>
                 <td className="num">{formatNumber(f.psi, 3)}</td>
                 <td className={`level-${f.level}`}>{LEVEL_LABELS[f.level]}</td>
               </tr>
@@ -141,10 +163,10 @@ function DriftPanel({ drift }: { drift: DriftReport | null }) {
           </tbody>
         </table>
       </div>
-      <div className="muted">
-        PSI ниже {drift.thresholds!.warning} — распределение стабильно, выше {drift.thresholds!.alert} — значительный сдвиг; при значительном дрейфе
-        сервис переобучения обновляет модель автоматически.
-      </div>
+      <p className="hint">
+        PSI показывает, насколько распределение признака в последних операциях отличается от обучающих данных: до {drift.thresholds!.warning} — стабильно,
+        выше {drift.thresholds!.alert} — существенный сдвиг. При существенном сдвиге модель переобучается автоматически.
+      </p>
     </>
   );
 }
@@ -168,96 +190,101 @@ export function ModelPage() {
   const retrain = async () => {
     try {
       await api.retrain();
-      setMessage("Переобучение запущено; результат появится в журнале модели.");
+      setMessage("Переобучение запущено. Результат появится в журнале модели через несколько минут.");
       window.setTimeout(load, 5000);
     } catch (e) {
       setError((e as Error).message);
     }
   };
 
-  if (error) return <div className="alert-error">Ошибка: {error}</div>;
-  if (!info) return <div className="card">Загрузка…</div>;
+  if (error) return <div className="alert-error">Не удалось загрузить сведения о модели: {error}</div>;
+  if (!info) return <div className="card loading">Загрузка…</div>;
   const m = info.model;
   const runs = info.experiment_runs ?? [];
   const summary = runs[run]?.summary ?? info.experiments;
 
   return (
     <div className="stack">
-      <div className="card">
-        <div className="card-head">
-          <h2>Рабочая модель</h2>
-          {me.role === "admin" && (
-            <button type="button" className="btn" onClick={retrain}>
-              Переобучить на накопленных данных
-            </button>
+      <div className="page-head">
+        <div>
+          <h1>Модель</h1>
+          <p className="muted">Рабочая модель, контроль изменений в данных и результаты экспериментов.</p>
+        </div>
+        {me.role === "admin" && (
+          <button type="button" className="btn primary" onClick={retrain}>
+            Переобучить на накопленных данных
+          </button>
+        )}
+      </div>
+      {message && <div className="alert-success">{message}</div>}
+
+      <div className="grid-2">
+        <div className="card">
+          <h3>Рабочая модель</h3>
+          <dl className="props">
+            <dt>Метод</dt>
+            <dd>{MODEL_KIND_LABELS[m.kind] ?? m.kind}</dd>
+            <dt>Обучена</dt>
+            <dd>{formatDate(m.trained_at)}</dd>
+            <dt>Пороги риска</dt>
+            <dd>
+              средний — от {formatNumber(m.thresholds.medium, 2)}, высокий — от {formatNumber(m.thresholds.high, 2)}
+            </dd>
+            <dt>Признаков</dt>
+            <dd>{m.feature_names.length}</dd>
+            {m.metrics.test && (
+              <>
+                <dt>Качество на тесте</dt>
+                <dd>
+                  найдено {formatPercent(m.metrics.test.recall, 0)} аномалий, верных срабатываний {formatPercent(m.metrics.test.precision, 0)}
+                </dd>
+              </>
+            )}
+            <dt>Версия</dt>
+            <dd className="mono muted">{m.version}</dd>
+          </dl>
+        </div>
+        <div className="card">
+          <h3>Журнал модели</h3>
+          {events.length === 0 ? (
+            <p className="muted">Событий пока нет.</p>
+          ) : (
+            <ul className="timeline">
+              {events.map((e) => (
+                <li key={e.id}>
+                  <span className="muted">{formatDate(e.created_at)}</span>
+                  <span>{EVENT_LABELS[e.event_type] ?? e.event_type}</span>
+                  {typeof e.details.reason === "string" && <span className="muted">{e.details.reason}</span>}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
-        {message && <div className="note">{message}</div>}
-        <dl className="props">
-          <dt>Тип</dt>
-          <dd>{m.kind}</dd>
-          <dt>Версия</dt>
-          <dd className="mono">{m.version}</dd>
-          <dt>Обучена</dt>
-          <dd>{formatDate(m.trained_at)}</dd>
-          <dt>Пороги риска</dt>
-          <dd>
-            средний ≥ {formatNumber(m.thresholds.medium, 2)}, высокий ≥ {formatNumber(m.thresholds.high, 2)}
-          </dd>
-          <dt>Признаков</dt>
-          <dd>{m.feature_names.length}</dd>
-          <dt>Параметры</dt>
-          <dd className="mono">{JSON.stringify(m.params)}</dd>
-          {m.metrics.test && (
-            <>
-              <dt>Качество на тесте</dt>
-              <dd>
-                Precision {formatNumber(m.metrics.test.precision, 2)} · Recall {formatNumber(m.metrics.test.recall, 2)} · F1{" "}
-                {formatNumber(m.metrics.test.f1, 2)} · ROC-AUC {formatNumber(m.metrics.test.roc_auc, 3)} · AP{" "}
-                {formatNumber(m.metrics.test.pr_auc, 3)}
-              </dd>
-            </>
-          )}
-        </dl>
       </div>
 
       <div className="card">
-        <h3>Мониторинг дрейфа данных</h3>
+        <h3>Изменения в данных (дрейф)</h3>
         <DriftPanel drift={drift} />
       </div>
 
-      <div className="card">
-        <h3>Журнал модели</h3>
-        {events.length === 0 ? (
-          <div className="muted">Событий нет</div>
-        ) : (
-          <ul className="reasons">
-            {events.map((e) => (
-              <li key={e.id}>
-                {formatDate(e.created_at)} — {EVENT_LABELS[e.event_type] ?? e.event_type}
-                {e.model_version && <span className="mono"> · {e.model_version}</span>}
-                {typeof e.details.reason === "string" && <span className="muted"> · {e.details.reason}</span>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {runs.length > 1 && (
-        <div className="card run-select">
-          <span>Результаты экспериментов:</span>
-          <select value={run} onChange={(e) => setRun(Number(e.target.value))}>
+      <div className="section-head">
+        <h2>Результаты экспериментов</h2>
+        {runs.length > 1 && (
+          <select value={run} onChange={(e) => setRun(Number(e.target.value))} aria-label="Набор результатов">
             {runs.map((r, i) => (
               <option key={r.name} value={i}>
-                {r.name}
+                {runTitle(r.name)}
                 {r.rows ? ` — ${formatNumber(r.rows, 0)} операций` : ""}
-                {r.anomaly_share ? `, аномалий ${formatPercent(r.anomaly_share, 2)}` : ""}
               </option>
             ))}
           </select>
-        </div>
+        )}
+      </div>
+      {summary ? (
+        <Experiments summary={summary} />
+      ) : (
+        <div className="card muted">Результаты экспериментов не найдены. Запустите: python -m app.ml.experiments</div>
       )}
-      {summary ? <Experiments summary={summary} /> : <div className="card muted">Результаты экспериментов не найдены. Запустите: python -m app.ml.experiments</div>}
     </div>
   );
 }

@@ -54,60 +54,76 @@ export function Dashboard() {
 
   const visible = onlyFlagged ? feed.filter((t) => t.analysis.risk_level !== "low") : feed;
   const sim = stats?.simulation_check;
+  const waiting = stats?.by_status.needs_review ?? 0;
 
   return (
     <div className="stack">
-      {error && <div className="alert-error">Ошибка загрузки: {error}</div>}
-      <div className="cards">
-        <div className="card stat">
-          <div className="stat-label">Всего транзакций</div>
-          <div className="stat-value">{stats ? formatNumber(stats.total_transactions, 0) : "—"}</div>
-          <div className="muted">клиентов: {stats?.clients ?? "—"}</div>
+      <div className="page-head">
+        <div>
+          <h1>Онлайн-поток</h1>
+          <p className="muted">Операции появляются здесь сразу после анализа.</p>
         </div>
+        <span className={`conn conn-${connection}`}>
+          <span className="dot" />
+          {connection === "open" ? "Подключено" : connection === "connecting" ? "Подключение…" : "Нет связи с сервером"}
+        </span>
+      </div>
+      {error && <div className="alert-error">Не удалось загрузить данные: {error}</div>}
+
+      <div className="cards">
+        <a className="card stat stat-link" href="#/transactions">
+          <div className="stat-label">Ждут проверки</div>
+          <div className={`stat-value ${waiting > 0 ? "risk-text-medium" : ""}`}>{stats ? formatNumber(waiting, 0) : "—"}</div>
+          <div className="muted">Открыть список →</div>
+        </a>
         <div className="card stat">
           <div className="stat-label">Высокий риск</div>
-          <div className="stat-value risk-text-high">{stats?.by_risk.high ?? "—"}</div>
-          <div className="muted">средний: {stats?.by_risk.medium ?? "—"}</div>
+          <div className="stat-value risk-text-high">{stats ? formatNumber(stats.by_risk.high ?? 0, 0) : "—"}</div>
+          <div className="muted">средний: {stats ? formatNumber(stats.by_risk.medium ?? 0, 0) : "—"}</div>
         </div>
         <div className="card stat">
-          <div className="stat-label">Доля помеченных</div>
-          <div className="stat-value">{stats ? formatPercent(stats.flagged_share) : "—"}</div>
-          <div className="muted">на проверке: {stats?.by_status.needs_review ?? 0}</div>
+          <div className="stat-label">Всего операций</div>
+          <div className="stat-value">{stats ? formatNumber(stats.total_transactions, 0) : "—"}</div>
+          <div className="muted">
+            клиентов: {stats ? formatNumber(stats.clients, 0) : "—"} · отмечено {stats ? formatPercent(stats.flagged_share) : "—"}
+          </div>
         </div>
         <div className="card stat">
-          <div className="stat-label">Поток</div>
-          <div className="stat-value">{stats?.transactions_last_minute ?? "—"}</div>
-          <div className="muted">за минуту · {stats ? formatNumber(stats.avg_latency_ms, 1) : "—"} мс на анализ</div>
+          <div className="stat-label">За последнюю минуту</div>
+          <div className="stat-value">{stats ? formatNumber(stats.transactions_last_minute, 0) : "—"}</div>
+          <div className="muted">анализ одной операции: {stats ? formatNumber(stats.avg_latency_ms, 0) : "—"} мс</div>
         </div>
-        {sim && (
-          <div className="card stat" title="Сравнение с истинными метками симулятора (только для демонстрации)">
-            <div className="stat-label">Проверка по меткам симулятора</div>
+        {sim && sim.precision !== null && sim.recall !== null && (
+          <div className="card stat" title="Демонстрационные операции заранее размечены симулятором; сравнение показывает качество выявления">
+            <div className="stat-label">Качество на демо-данных</div>
             <div className="stat-value small">
-              P {sim.precision !== null ? formatNumber(sim.precision, 2) : "—"} · R {sim.recall !== null ? formatNumber(sim.recall, 2) : "—"}
+              найдено {formatPercent(sim.recall, 0)} аномалий
             </div>
-            <div className="muted">
-              TP {sim.true_positive} · FP {sim.false_positive} · FN {sim.false_negative}
-            </div>
+            <div className="muted">верных срабатываний: {formatPercent(sim.precision, 0)}</div>
           </div>
         )}
       </div>
 
       <div className="card">
-        <div className="card-head">
-          <h2>Поток транзакций</h2>
-          <div className="row">
-            <span className={`conn conn-${connection}`}>
-              {connection === "open" ? "онлайн" : connection === "connecting" ? "подключение…" : "нет связи"}
-            </span>
-            <label className="check">
-              <input type="checkbox" checked={onlyFlagged} onChange={(e) => setOnlyFlagged(e.target.checked)} /> только помеченные
-            </label>
-            <button type="button" className="btn" onClick={() => setPaused((p) => !p)}>
-              {paused ? "Продолжить" : "Пауза"}
+        <div className="toolbar">
+          <div className="segmented" role="group" aria-label="Какие операции показать">
+            <button type="button" className={!onlyFlagged ? "on" : ""} onClick={() => setOnlyFlagged(false)}>
+              Все операции
+            </button>
+            <button type="button" className={onlyFlagged ? "on" : ""} onClick={() => setOnlyFlagged(true)}>
+              Требующие внимания
             </button>
           </div>
+          <button type="button" className="btn" onClick={() => setPaused((p) => !p)}>
+            {paused ? "▶ Продолжить" : "❚❚ Пауза"}
+          </button>
         </div>
-        <TransactionTable items={visible} freshIds={fresh} empty="Ожидание транзакций… Запустите симулятор" />
+        {paused && <p className="hint">Поток приостановлен: новые операции продолжают анализироваться, но не добавляются в список.</p>}
+        <TransactionTable
+          items={visible}
+          freshIds={fresh}
+          empty={onlyFlagged ? "Среди последних операций нет требующих внимания" : "Ожидание операций… Убедитесь, что симулятор запущен"}
+        />
       </div>
     </div>
   );

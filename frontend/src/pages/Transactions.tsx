@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api, type TransactionFilters } from "../api";
 import { Filters } from "../components/Filters";
+import { Pager } from "../components/Pager";
 import { TransactionTable } from "../components/TransactionTable";
+import { formatNumber } from "../format";
 import type { Transaction } from "../types";
 
 const initial: TransactionFilters = {
@@ -22,7 +24,7 @@ export function Transactions() {
   const [filters, setFilters] = useState<TransactionFilters>(initial);
   const [items, setItems] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -46,30 +48,22 @@ export function Transactions() {
     };
   }, [filters]);
 
-  const pages = Math.max(1, Math.ceil(total / filters.limit));
-  const page = Math.floor(filters.offset / filters.limit) + 1;
-
   return (
     <div className="stack">
-      <Filters value={filters} onChange={setFilters} />
-      {error && <div className="alert-error">Ошибка загрузки: {error}</div>}
+      <div className="page-head">
+        <div>
+          <h1>Операции</h1>
+          <p className="muted">По умолчанию показаны операции со средним и высоким риском — их стоит проверить в первую очередь.</p>
+        </div>
+      </div>
+      <Filters value={filters} onChange={setFilters} onReset={() => setFilters(initial)} />
+      {error && <div className="alert-error">Не удалось загрузить операции: {error}</div>}
       <div className="card">
-        <div className="card-head">
-          <h2>Транзакции</h2>
-          <span className="muted">{loading ? "загрузка…" : `найдено: ${total}`}</span>
+        <div className="toolbar">
+          <span className="muted">{loading ? "Загрузка…" : `Найдено: ${formatNumber(total, 0)}`}</span>
         </div>
-        <TransactionTable items={items} empty="По выбранным условиям транзакций нет" />
-        <div className="pager">
-          <button type="button" className="btn" disabled={page <= 1} onClick={() => setFilters({ ...filters, offset: filters.offset - filters.limit })}>
-            ← Назад
-          </button>
-          <span>
-            Страница {page} из {pages}
-          </span>
-          <button type="button" className="btn" disabled={page >= pages} onClick={() => setFilters({ ...filters, offset: filters.offset + filters.limit })}>
-            Вперёд →
-          </button>
-        </div>
+        <TransactionTable items={items} empty="По выбранным условиям операций нет — попробуйте изменить фильтры" />
+        <Pager total={total} limit={filters.limit} offset={filters.offset} onChange={(offset) => setFilters({ ...filters, offset })} />
       </div>
     </div>
   );
