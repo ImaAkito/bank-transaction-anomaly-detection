@@ -18,11 +18,17 @@ x-backend-env: &backend-env
   INGEST_API_KEY: ${INGEST_API_KEY:-demo-ingest-key}
   DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
 
-x-backend: &backend
-  build: ./backend
+# Образ backend собирает только сервис trainer; остальные backend-сервисы используют готовый образ.
+# Если образ собирают несколько сервисов сразу, Docker Desktop может завершить параллельную сборку
+# ошибкой «image ... already exists».
+x-backend-image: &backend-image
   image: anomaly-detection-backend
   volumes:
     - models:/models
+
+x-backend: &backend
+  <<: *backend-image
+  pull_policy: never
 
 services:
   postgres:
@@ -52,7 +58,9 @@ services:
 
   # Разовая задача: обучает модель и сохраняет артефакт в общий том, если его ещё нет.
   trainer:
-    <<: *backend
+    <<: *backend-image
+    build: ./backend
+    pull_policy: build  # образ только собирается локально, без попытки скачать его из Docker Hub
     command: >
       sh -c "test -f /models/model.joblib
       && echo 'Модель уже обучена, пропуск'
