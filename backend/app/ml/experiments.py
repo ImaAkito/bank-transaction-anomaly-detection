@@ -7,9 +7,14 @@
 * хронологическое разбиение 65% / 15% / 20% (обучение / валидация / тест), профили клиентов
   накапливаются последовательно, как в эксплуатации;
 * неконтролируемые методы обучаются на обучающей части БЕЗ меток (в ней есть аномалии, как в реальных данных);
-* параметры подбираются по PR-AUC на валидационной части;
+* параметры подбираются по Average Precision (AP, оценка площади под PR-кривой) на валидационной части;
 * пороги: (а) «без меток» — квантиль 98% оценок обучающей части, (б) «по валидации» — порог максимального F1
   на валидационной части; итоговые метрики считаются на тестовой части.
+
+Финальная проверка (--final): конфигурация (группы признаков, набор методов, сетки параметров) заморожена
+заранее и не меняется по её итогам; анализ групп признаков не выполняется, чтобы отложенные данные
+не участвовали в выборе решений. Период задаётся --ibm-from-year/--ibm-to-year и не должен пересекаться
+с данными, на которых выбиралась конфигурация.
 """
 import argparse
 import itertools
@@ -250,6 +255,8 @@ def assess(fitted: Fitted, Xtr, Xva, yva, Xte, yte, test_types) -> dict:
 
 POPULATION_MODE = "fixed"  # --population-mode
 LARGE: dict | None = None  # --ibm-full: параметры потоковой обработки полного объёма
+FINAL = False  # --final: замороженная конфигурация, без анализа групп признаков
+PROTOCOL: dict = {}  # описание запуска для отчёта: режим, период, группы признаков
 
 
 def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dict | None) -> dict:
@@ -313,6 +320,8 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
 
     # Влияние групп признаков: Isolation Forest с фиксированными параметрами.
     ablation: dict[str, dict] = {}
+    if FINAL:
+        log.info("seed %s: финальная проверка, анализ групп признаков пропущен", seed)
 
     def ablate(label: str, columns: list[str]):
         m = matrices(columns)
@@ -321,17 +330,18 @@ def run_seed(seed: int, source: Callable[[int], pd.DataFrame], tuned_params: dic
         ablation[label] = {"n_features": len(columns), "roc_auc": r["roc_auc"], "pr_auc": r["pr_auc"],
                            "label_free_threshold": r["label_free_threshold"]}
 
-    ablate("Все признаки", FEATURES)
-    for group, cols in FEATURE_GROUPS.items():
-        if set(cols) & set(FEATURES) and set(FEATURES) - set(cols):
-            ablate(f"Без группы «{group}»", [c for c in FEATURES if c not in cols])
-    context_free = [c for c in CONTEXT_FREE_FEATURES if c in FEATURES]
-    for group, cols in FEATURE_GROUPS.items():
-        if group != "history" and set(cols) & set(FEATURES) and context_free:
-            keep = set(cols) | set(context_free)
-            ablate(f"Только «{group}» + сумма/время", [c for c in FEATURES if c in keep])
-    if context_free:
-        ablate("Без профиля клиента (сумма и время)", context_free)
+    if not FINAL:
+        ablate("Все признаки", FEATURES)
+        for group, cols in FEATURE_GROUPS.items():
+            if set(cols) & set(FEATURES) and set(FEATURES) - set(cols):
+                ablate(f"Без группы «{group}»", [c for c in FEATURES if c not in cols])
+        context_free = [c for c in CONTEXT_FREE_FEATURES if c in FEATURES]
+        for group, cols in FEATURE_GROUPS.items():
+            if group != "history" and set(cols) & set(FEATURES) and context_free:
+                keep = set(cols) | set(context_free)
+                ablate(f"Только «{group}» + сумма/время", [c for c in FEATURES if c in keep])
+        if context_free:
+            ablate("Без профиля клиента (сумма и время)", context_free)
 
     curves = {name: r["_scores"] for name, r in models.items()}
     for r in models.values():
@@ -379,6 +389,7 @@ def aggregate(runs: list[dict]) -> dict:
             "f1": _agg([r["label_free_threshold"]["f1"] for r in rows]),
         }
     return {
+        "protocol": dict(PROTOCOL),
         "seeds": [r["seed"] for r in runs],
         "datasets": [r["info"] for r in runs],
         "tuned_isolation_forest_params": runs[0]["tuned_if_params"],
@@ -397,19 +408,24 @@ def _pm(a: dict, digits=3) -> str:
 
 def write_report(summary: dict, path: Path) -> None:
     d0 = summary["datasets"][0]
+    protocol = summary.get("protocol", {})
+    final = protocol.get("mode") == "final"
     lines = [
-        "# Результаты экспериментов",
+        "# Финальная проверка на отложенном периоде" if final else "# Результаты экспериментов",
         "",
         f"Независимых наборов данных (seed): {len(summary['seeds'])} ({', '.join(map(str, summary['seeds']))}). "
         f"Размер набора: около {_thousands(d0['rows'])} транзакций, доля аномалий {d0['anomaly_share']:.2%}. "
         "Хронологическое разбиение 65/15/20. "
         "Значения: среднее ± стандартное отклонение по наборам, метрики на тестовой части.",
         "",
-        f"Параметры Isolation Forest, подобранные по PR-AUC на валидации: `{json.dumps(summary['tuned_isolation_forest_params'])}`.",
+        *([f"Протокол: финальная проверка. Период: {protocol.get('period', '—')}. "
+           f"Группы признаков (заморожены до запуска): {protocol.get('feature_groups') or 'по умолчанию'}. "
+           "Конфигурация по итогам этого прогона не меняется; анализ групп признаков не выполнялся.", ""] if final else []),
+        f"Параметры Isolation Forest, подобранные по AP на валидации: `{json.dumps(summary['tuned_isolation_forest_params'])}`.",
         "",
         "## 1. Сравнение методов (порог по максимуму F1 на валидации)",
         "",
-        "| Метод | Тип | Precision | Recall | F1 | ROC-AUC | PR-AUC |",
+        "| Метод | Тип | Precision | Recall | F1 | ROC-AUC | AP (PR-AUC) |",
         "|---|---|---|---|---|---|---|",
     ]
     for name, m in summary["models"].items():
@@ -439,10 +455,11 @@ def write_report(summary: dict, path: Path) -> None:
                   "| Тип аномалии | Recall |", "|---|---|"]
         for t, v in summary["models"]["IsolationForest"]["recall_by_type"].items():
             lines.append(f"| {t} | {_pm(v)} |")
-    lines += ["", "## 4. Влияние групп признаков (Isolation Forest, параметры фиксированы)", "",
-              "| Набор признаков | Число признаков | ROC-AUC | PR-AUC | F1 (порог без меток) |", "|---|---|---|---|---|"]
-    for label, a in summary["ablation"].items():
-        lines.append(f"| {label} | {a['n_features']} | {_pm(a['roc_auc'])} | {_pm(a['pr_auc'])} | {_pm(a['f1'])} |")
+    if summary["ablation"]:
+        lines += ["", "## 4. Влияние групп признаков (Isolation Forest, параметры фиксированы)", "",
+                  "| Набор признаков | Число признаков | ROC-AUC | AP (PR-AUC) | F1 (порог без меток) |", "|---|---|---|---|---|"]
+        for label, a in summary["ablation"].items():
+            lines.append(f"| {label} | {a['n_features']} | {_pm(a['roc_auc'])} | {_pm(a['pr_auc'])} | {_pm(a['f1'])} |")
     lines += ["", "## 5. Вычислительные затраты", "", "| Метод | Обучение, с | Оценка 1000 транзакций, мс |", "|---|---|---|"]
     for name, m in summary["models"].items():
         lines.append(f"| {name} | {_pm(m['fit_seconds'], 1)} | {_pm(m['score_ms_per_1k'], 1)} |")
@@ -450,7 +467,10 @@ def write_report(summary: dict, path: Path) -> None:
         "",
         "Время обучения Isolation Forest на первом наборе включает перебор сетки параметров (18 вариантов).",
         "",
-        "Графики: `pr_curves.png`, `roc_curves.png`, `ablation.png`.",
+        "AP (Average Precision) вычисляется функцией `sklearn.metrics.average_precision_score` "
+        "(взвешенная сумма точности по шагам полноты, без трапециевидной интерполяции).",
+        "",
+        "Графики: `pr_curves.png`, `roc_curves.png`" + (", `ablation.png`." if summary["ablation"] else "."),
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -487,6 +507,8 @@ def write_plots(out: Path, curves: tuple, summary: dict) -> None:
         plt.close(fig)
 
     labels = list(summary["ablation"])
+    if not labels:
+        return
     values = [summary["ablation"][k]["pr_auc"]["mean"] for k in labels]
     errors = [summary["ablation"][k]["pr_auc"]["std"] for k in labels]
     fig, ax = plt.subplots(figsize=(9, 6))
@@ -494,7 +516,7 @@ def write_plots(out: Path, curves: tuple, summary: dict) -> None:
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.invert_yaxis()
-    ax.set_xlabel("PR-AUC (тест)")
+    ax.set_xlabel("AP, Average Precision (тест)")
     ax.set_title("Влияние групп признаков на качество Isolation Forest")
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout()
@@ -524,13 +546,21 @@ def main() -> None:
     parser.add_argument("--ibm-user-fraction", type=float, default=None,
                         help="доля пользователей (по умолчанию 0,05; с --ibm-full — 1,0, весь объём)")
     parser.add_argument("--ibm-from-year", type=int, default=2010)
+    parser.add_argument("--ibm-to-year", type=int, default=None, help="последний год периода включительно (по умолчанию — до конца файла)")
+    parser.add_argument("--final", action="store_true",
+                        help="финальная проверка: конфигурация заморожена, анализ групп признаков не выполняется")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     FEATURES[:] = select_features(args.feature_groups)
-    global POPULATION_MODE
+    global POPULATION_MODE, FINAL
     POPULATION_MODE = args.population_mode
+    FINAL = args.final
+    period = (f"{args.ibm_from_year}–{args.ibm_to_year if args.ibm_to_year is not None else 'конец файла'}"
+              if args.dataset == "ibm" else f"синтетические данные, {args.days} дней")
+    PROTOCOL.update({"mode": "final" if args.final else "development", "dataset": args.dataset, "period": period,
+                     "feature_groups": args.feature_groups, "population_mode": args.population_mode})
     log.info("Признаков: %s (%s)", len(FEATURES), args.feature_groups or "все группы")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -544,14 +574,14 @@ def main() -> None:
             global LARGE
             LARGE = {"path": args.ibm_path, "workdir": args.workdir, "parts": args.parts, "workers": args.workers,
                      "negative_rate": args.negative_rate, "user_fraction": args.ibm_user_fraction,
-                     "from_year": args.ibm_from_year}
+                     "from_year": args.ibm_from_year, "to_year": args.ibm_to_year}
             if args.seeds == [42, 43, 44]:
                 args.seeds = [42]  # данные одни и те же; seed влияет только на модели
         from app.ml.ibm_loader import load_ibm
 
         # Разные seed дают разные выборки пользователей.
         def source(seed: int) -> pd.DataFrame:
-            return load_ibm(args.ibm_path, args.ibm_user_fraction, args.ibm_from_year, seed)
+            return load_ibm(args.ibm_path, args.ibm_user_fraction, args.ibm_from_year, seed, to_year=args.ibm_to_year)
     else:
         def source(seed: int) -> pd.DataFrame:
             return generate_transactions(args.clients, args.days, seed)

@@ -29,7 +29,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
                 <th className="num">Recall</th>
                 <th className="num">F1</th>
                 <th className="num">ROC-AUC</th>
-                <th className="num">PR-AUC</th>
+                <th className="num">AP (PR-AUC)</th>
               </tr>
             </thead>
             <tbody>
@@ -80,6 +80,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
           </div>
         </div>
       )}
+      {Object.keys(summary.ablation).length > 0 && (
       <div className="card">
         <h3>Влияние групп признаков (Isolation Forest)</h3>
         <div className="table-wrap">
@@ -89,7 +90,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
                 <th>Набор признаков</th>
                 <th className="num">Признаков</th>
                 <th className="num">ROC-AUC</th>
-                <th className="num">PR-AUC</th>
+                <th className="num">AP (PR-AUC)</th>
               </tr>
             </thead>
             <tbody>
@@ -105,6 +106,7 @@ function Experiments({ summary }: { summary: ExperimentSummary }) {
           </table>
         </div>
       </div>
+      )}
     </>
   );
 }
@@ -211,7 +213,7 @@ export function ModelPage() {
               <dt>Качество на тесте</dt>
               <dd>
                 Precision {formatNumber(m.metrics.test.precision, 2)} · Recall {formatNumber(m.metrics.test.recall, 2)} · F1{" "}
-                {formatNumber(m.metrics.test.f1, 2)} · ROC-AUC {formatNumber(m.metrics.test.roc_auc, 3)} · PR-AUC{" "}
+                {formatNumber(m.metrics.test.f1, 2)} · ROC-AUC {formatNumber(m.metrics.test.roc_auc, 3)} · AP{" "}
                 {formatNumber(m.metrics.test.pr_auc, 3)}
               </dd>
             </>
