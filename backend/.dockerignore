@@ -1,7 +1,21 @@
+# В образ попадают только app, migrations, alembic.ini, requirements.txt и experiments (см. Dockerfile).
+# Всё остальное исключается, чтобы сборка не копировала гигабайты данных (например, датасет IBM).
 __pycache__
 *.pyc
 .pytest_cache
+.venv
+venv
+.env
 data
 models
 tests
-.env
+datasets
+catboost_info
+*.csv
+*.csv.gz
+*.zip
+*.parquet
+*.db
+*.sqlite
+*.joblib
+experiments/cache
